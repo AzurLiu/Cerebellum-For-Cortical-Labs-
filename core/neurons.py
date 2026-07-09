@@ -131,7 +131,8 @@ class MockNeurons:
     testing without access to biological hardware.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, seed: int = None) -> None:
+        self._rng = np.random.RandomState(seed)
         self.n_channels: int = 64
         self.stim_buffer: np.ndarray = np.zeros(64)
         self.sensitivity: np.ndarray = np.ones(64) * 170.0
@@ -139,6 +140,11 @@ class MockNeurons:
         # Metabolic health tracking
         self.cumulative_stim: np.ndarray = np.zeros(64)
         self.health: np.ndarray = np.ones(64)  # 1.0 = healthy, <0.5 = needs rest
+        # STDP timing state
+        self._last_stim_time: np.ndarray = np.zeros(64)
+        self._last_spike_time: np.ndarray = np.zeros(64)
+        self._reward_trace: float = 0.0
+        self._baseline_sensitivity: np.ndarray = np.ones(64) * 170.0
 
     def __enter__(self) -> "MockNeurons":
         return self
@@ -182,8 +188,7 @@ class MockNeurons:
             intensity = |amplitude| × burst_count × (burst_freq / 100)
 
         Each stimulated channel's response is modulated by its current
-        metabolic health (unhealthy channels have reduced response),
-        and a small plasticity term is applied (sensitivity += 0.01 × intensity).
+        metabolic health (unhealthy channels have reduced response).
 
         Metabolic health decays with cumulative stimulation to prevent
         excitotoxicity, with a hard floor at 0.3.
@@ -202,10 +207,24 @@ class MockNeurons:
             # Metabolic guardrail: unhealthy channels have reduced response
             effective = intensity * self.health[ch]
             self.stim_buffer[ch] += effective
-            self.sensitivity[ch] += 0.01 * effective  # LTP-like plasticity
             self.cumulative_stim[ch] += intensity
             # Health decays with cumulative stim (excitotoxicity model)
             self.health[ch] = max(0.3, 1.0 - self.cumulative_stim[ch] * 0.0001)
+            self._last_stim_time[ch] = self.timestamp
+
+    def inject_reward(self, reward: float) -> None:
+        """Inject external reward signal to modulate synaptic plasticity.
+
+        Positive reward strengthens recently co-active pathways (LTP).
+        Negative reward weakens them (LTD). This implements reward-modulated
+        STDP, where the reward signal acts as a neuromodulatory gate on
+        Hebbian plasticity — analogous to dopaminergic modulation in
+        biological cortical circuits.
+
+        Args:
+            reward: Scalar reward signal, clipped to [-1, 1] internally.
+        """
+        self._reward_trace = np.clip(reward, -1.0, 1.0)
 
     def read(self, frame_count: int, from_timestamp: Optional[int]) -> np.ndarray:
         """Read neural activity data from the MEA.
@@ -214,9 +233,17 @@ class MockNeurons:
         stimulations. The firing rate per channel is:
             rate = clip(sensitivity + stim_buffer × 30, 50, 600) Hz
 
-        After each read, the stimulus buffer decays by 0.7× (exponential
-        washout) and health recovers by +0.001 per channel (slow homeostatic
-        recovery).
+        After each read:
+        - A simplified refractory period suppresses consecutive bursts.
+        - Weak coupling between adjacent channels models local field spread.
+        - The stimulus buffer decays by 70% (exponential washout).
+        - Reward-modulated STDP adjusts per-channel sensitivity based on
+          the timing of stimulation and spiking events, gated by the
+          current reward trace.
+        - Homeostatic drift pulls sensitivity toward baseline to prevent
+          runaway excitation or silencing.
+        - Health recovers by +0.001 per channel (slow metabolic recovery).
+        - The reward trace decays exponentially (×0.95).
 
         Args:
             frame_count: Number of temporal frames to read.
@@ -230,10 +257,47 @@ class MockNeurons:
         """
         rates = np.clip(self.sensitivity + self.stim_buffer * 30.0, 50, 600)
         frames = np.zeros((frame_count, self.n_channels), dtype=np.int16)
+
         for ch in range(self.n_channels):
-            frames[:, ch] = np.random.poisson(rates[ch], frame_count).astype(np.int16)
-        self.stim_buffer *= 0.3  # Stimulus buffer exponential decay
-        self.health = np.minimum(1.0, self.health + 0.001)  # Slow homeostatic recovery
+            raw = self._rng.poisson(rates[ch], frame_count)
+            # Simplified refractory period: suppress after consecutive bursts
+            for t in range(2, frame_count):
+                if raw[t - 1] > rates[ch] * 1.5 and raw[t - 2] > rates[ch] * 1.5:
+                    raw[t] = max(0, raw[t] // 3)
+            frames[:, ch] = raw.astype(np.int16)
+
+        # Weak coupling between adjacent channels (local field spread)
+        coupled = frames.astype(np.float32)
+        for ch in range(1, 63):
+            coupled[:, ch] += 0.05 * (frames[:, ch - 1].astype(np.float32)
+                                      + frames[:, ch + 1].astype(np.float32))
+        frames = np.clip(coupled, 0, 32767).astype(np.int16)
+
+        # Retain 30% of stimulus buffer (decay 70% per read cycle)
+        self.stim_buffer *= 0.3
+
+        # STDP + reward-modulated plasticity
+        for ch in range(self.n_channels):
+            dt = self._last_stim_time[ch] - self._last_spike_time[ch]
+            if abs(dt) < 50:  # Within STDP timing window
+                # Pre-before-post (dt < 0) → LTP direction
+                # Post-before-pre (dt > 0) → LTD direction
+                stdp_sign = -1.0 if dt < 0 else 1.0
+                # Reward modulates magnitude and can flip sign
+                plasticity = 0.005 * stdp_sign * (1.0 + self._reward_trace)
+                self.sensitivity[ch] += plasticity
+            # Update spike timing (simplified: rate > threshold → spike)
+            if rates[ch] > 250:
+                self._last_spike_time[ch] = self.timestamp
+
+        # Homeostatic drift toward baseline (prevents runaway)
+        self.sensitivity += 0.001 * (self._baseline_sensitivity - self.sensitivity)
+        self.sensitivity = np.clip(self.sensitivity, 100.0, 400.0)
+
+        # Slow metabolic recovery
+        self.health = np.minimum(1.0, self.health + 0.001)
+        # Reward trace exponential decay
+        self._reward_trace *= 0.95
         self.timestamp += frame_count
         return frames
 

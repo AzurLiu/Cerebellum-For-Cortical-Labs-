@@ -32,10 +32,11 @@ from core.curiosity import NeuralCuriosity
 from core.video import save_video, make_side_by_side
 
 # ═══ Configuration ═══
+SEED            = 42
 ENV_NAME        = "NutAssembly"
 ROBOT           = "Panda"
 CL1_EPISODES    = 200;  CL1_MAX_STEPS = 200
-PPO_TIMESTEPS   = 20_000;  PPO_EVAL_EPS = 200
+PPO_TIMESTEPS   = 200_000;  PPO_EVAL_EPS = 200
 RANDOM_EPISODES = 200
 VIDEO_FPS       = 30
 VIDEO_CL1       = "cl1_nutassembly.mp4"
@@ -68,10 +69,22 @@ def extract_obs(obs):
         p2h = np.array(obs.get("peg_to_hole", obs.get("hole_pos", np.zeros(3)) - eef), dtype=np.float64).flatten()[:3]
         jnt = np.array(obs.get("robot0_joint_pos", np.zeros(7)), dtype=np.float64).flatten()
         return dict(eef_pos=eef, eef_vel=vel, force=frc, torque=trq, peg_to_hole=p2h, joint_pos=jnt)
+    # flat array 路径：记录警告，使用安全默认值
+    import warnings
+    warnings.warn(
+        "extract_obs received flat array — index mapping may be incorrect. "
+        "Prefer dict observations via RoboSuite config.",
+        stacklevel=2
+    )
     o = np.array(obs, dtype=np.float64).flatten(); n = len(o)
-    return dict(eef_pos=o[:3] if n>=3 else np.zeros(3), eef_vel=o[3:6] if n>=6 else np.zeros(3),
-                force=o[6:9] if n>=9 else np.zeros(3), torque=o[9:12] if n>=12 else np.zeros(3),
-                peg_to_hole=o[12:15] if n>=15 else np.zeros(3), joint_pos=o[15:22] if n>=22 else np.zeros(7))
+    return dict(
+        eef_pos=o[:3] if n >= 3 else np.zeros(3),
+        eef_vel=o[3:6] if n >= 6 else np.zeros(3),
+        force=np.zeros(3),   # 不猜测，返回零值
+        torque=np.zeros(3),  # 不猜测，返回零值
+        peg_to_hole=np.zeros(3),
+        joint_pos=np.zeros(7),
+    )
 
 def compute_insertion_depth(info):
     d = np.linalg.norm(info["peg_to_hole"]); return max(0.0, 0.1 - d), d
@@ -101,8 +114,16 @@ class VIE:
     get amplified, over-responsive channels get attenuated.
     """
 
-    CH_FORCE = list(range(0, 16)); CH_TORQUE = list(range(16, 32))
-    CH_POSITION = list(range(32, 48)); CH_GOALDIR = list(range(48, 64))
+    # 清晰的通道布局 — 无重叠
+    CH_FORCE_MAG   = list(range(0, 6))     # 力幅度速率编码
+    CH_FORCE_AXIS  = list(range(6, 12))    # 每轴力方向编码
+    CH_FORCE_WAVE  = list(range(12, 16))   # 力行波编码（缩减）
+    CH_TORQUE      = list(range(16, 28))   # 扭矩/摩擦
+    CH_VELOCITY    = list(range(28, 32))   # 速度补充（独立，不复用扭矩尾部）
+    CH_POSITION    = list(range(32, 47))   # 末端执行器位置
+    CH_GOALDIR     = list(range(47, 55))   # 目标方向
+    CH_DEPTH       = list(range(55, 60))   # 插入深度
+    CH_RESERVED    = list(range(60, 64))   # 预留
 
     def __init__(self, neurons, raw_env=None):
         self.neurons = neurons; self.raw_env = raw_env
@@ -130,29 +151,28 @@ class VIE:
         direction = peg_to_hole / (distance + 1e-8)
         stim = StimDesign(160, -1.0, 160, 1.0)
 
-        # ══ Native force/torque feedback (rate + temporal coding) ══
-
-        # Force → Rate Coding (CH 0-15)
+        # ══ Force Magnitude — Rate Coding (CH 0-5) ══
         force_mag = np.linalg.norm(force)
         fnorm = np.clip(force_mag / FORCE_SAFETY_THRESHOLD, 0.0, 1.5)
         fhz = int(np.clip(50 + 350 * fnorm, 50, 400))
-        fn = max(1, min(10, int(fnorm * 8 * self.channel_gain[self.CH_FORCE[0]])))
-        self.neurons.stim(ChannelSet(*self.CH_FORCE[:8]), stim, BurstDesign(fn, fhz))
+        fn = max(1, min(10, int(fnorm * 8 * self.channel_gain[self.CH_FORCE_MAG[0]])))
+        self.neurons.stim(ChannelSet(*self.CH_FORCE_MAG), stim, BurstDesign(fn, fhz))
+
+        # ══ Force Axis Encoding (CH 6-11) — per-axis direction ══
         for ax in range(3):
-            cb = self.CH_FORCE[8] + ax * 2
-            chs = ChannelSet(*[cb, min(cb + 1, 15)])
+            cb = self.CH_FORCE_AXIS[ax * 2]
+            chs = ChannelSet(*[cb, cb + 1])
             f = force[ax]; inten = np.clip(abs(f) / (FORCE_SAFETY_THRESHOLD / 3), 0.1, 2.0)
             fs = StimDesign(160, -inten * np.sign(f), 160, inten * np.sign(f))
             fb = BurstDesign(max(1, int(abs(f) / 3)), int(50 + abs(f) * 15))
             self.neurons.stim(chs, fs, fb)
 
-        # Light temporal coding (traveling waves) for dynamic force feedback
-        # Phase delays (1-5ms) between CH 8-15 simulate sliding/dynamic force transients
+        # ══ Force Wave Encoding (CH 12-15) — dynamic sliding feedback ══
         if force_mag > 0.05:
-            for wave_i in range(8):
-                ch_idx = self.CH_FORCE[8 + wave_i]
-                phase_delay_ms = 1.0 + 4.0 * (wave_i / 7.0)          # 1-5ms gradient
-                wave_freq = int(np.clip(40 + 160 * fnorm, 40, 200))   # scale with force
+            for wave_i in range(4):
+                ch_idx = self.CH_FORCE_WAVE[wave_i]
+                phase_delay_ms = 1.0 + 3.0 * (wave_i / 3.0)
+                wave_freq = int(np.clip(40 + 160 * fnorm, 40, 200))
                 wave_amp = np.clip(fnorm * 0.6, 0.05, 1.2)
                 wave_stim = StimDesign(
                     int(160 + phase_delay_ms * 10), -wave_amp,
@@ -160,56 +180,56 @@ class VIE:
                 )
                 self.neurons.stim(ChannelSet(ch_idx), wave_stim, BurstDesign(1, wave_freq))
 
-        # Torque/Friction → Traveling Waves (CH 16-31)
+        # ══ Torque/Friction — Traveling Waves (CH 16-27) ══
         tmag = np.linalg.norm(torque)
         if tmag > 0.01:
             for ax in range(3):
                 t = torque[ax]
                 if abs(t) > 0.01:
-                    cb = self.CH_TORQUE[0] + ax * 5
-                    chs = ChannelSet(*range(cb, min(cb + 5, 32)))
+                    cb = self.CH_TORQUE[0] + ax * 4
+                    chs = ChannelSet(*range(cb, min(cb + 4, 28)))
                     inten = np.clip(abs(t) * 3.0 * self.channel_gain[cb], 0.1, 2.0)
                     ws = StimDesign(160, -inten, 160, inten)
                     whz = int(np.clip(60 * abs(t), 20, 200))
                     self.neurons.stim(chs, ws, BurstDesign(2, whz))
 
-        # Position Encoding (CH 32-47)
+        # ══ Velocity Supplement (CH 28-31) — independent, no reuse ══
+        vmag = np.linalg.norm(eef_vel)
+        if vmag > 0.003:
+            for ax in range(3):
+                v = eef_vel[ax]
+                if abs(v) > 0.003 and ax < len(self.CH_VELOCITY):
+                    cb = self.CH_VELOCITY[ax]
+                    vi = np.clip(abs(v) * 5, 0.1, 2.0)
+                    vs = StimDesign(160, -vi, 160, vi)
+                    vhz = int(np.clip(60 * abs(v), 20, 200))
+                    self.neurons.stim(ChannelSet(cb), vs, BurstDesign(2, vhz))
+
+        # ══ Position Encoding (CH 32-46) ══
         for ax in range(3):
             cb = self.CH_POSITION[0] + ax * 5
-            chs = ChannelSet(*range(cb, min(cb + 5, 48)))
+            chs = ChannelSet(*range(cb, min(cb + 5, 47)))
             p = eef_pos[ax]; g = self.channel_gain[cb]
             phz = int(np.clip((100 + 200 * abs(p)) * g, 50, 350))
             ps = StimDesign(160, -abs(p) * 0.8 * g, 160, abs(p) * 0.8 * g)
             self.neurons.stim(chs, ps, BurstDesign(2, phz))
 
-        # Goal Direction (CH 48-55)
+        # ══ Goal Direction (CH 47-54) ══
         for ax in range(3):
             cb = self.CH_GOALDIR[0] + ax * 2
-            chs = ChannelSet(*[cb, min(cb + 1, 55)])
+            chs = ChannelSet(*[cb, min(cb + 1, 54)])
             d = direction[ax]; inten = np.clip((abs(d) * 1.5 + 0.1) * self.channel_gain[cb], 0.1, 2.0)
             ds = StimDesign(160, -inten * np.sign(d), 160, inten * np.sign(d))
             db = BurstDesign(max(1, int(abs(d) * 5)), int(50 + abs(d) * 100))
             self.neurons.stim(chs, ds, db)
 
-        # Insertion Depth (CH 56-63)
+        # ══ Insertion Depth (CH 55-59) ══
         depth, _ = compute_insertion_depth(obs_info)
         dn = np.clip(depth / INSERTION_DEPTH_THRESHOLD, 0.0, 2.0)
-        dg = np.mean(self.channel_gain[self.CH_GOALDIR[8:16]])
+        dg = np.mean(self.channel_gain[self.CH_DEPTH[:5]])
         dhz = int(np.clip((50 + 300 * dn) * dg, 50, 400)); dnn = max(1, int(dn * 6 * dg))
         dstim = StimDesign(160, -0.8, 160, 0.8)
-        self.neurons.stim(ChannelSet(*self.CH_GOALDIR[8:16]), dstim, BurstDesign(dnn, dhz))
-
-        # Velocity supplement (reuse CH_TORQUE tail)
-        vmag = np.linalg.norm(eef_vel)
-        if vmag > 0.003:
-            for ax in range(3):
-                v = eef_vel[ax]
-                if abs(v) > 0.003:
-                    cb = min(self.CH_TORQUE[0] + 15 + ax, 31)
-                    vi = np.clip(abs(v) * 5, 0.1, 2.0)
-                    vs = StimDesign(160, -vi, 160, vi)
-                    vhz = int(np.clip(60 * abs(v), 20, 200))
-                    self.neurons.stim(ChannelSet(cb), vs, BurstDesign(2, vhz))
+        self.neurons.stim(ChannelSet(*self.CH_DEPTH), dstim, BurstDesign(dnn, dhz))
 
     def adapt(self, firing_rates):
         """Online adaptation of channel encoding gains.
@@ -754,6 +774,7 @@ class CL1Agent:
         self.decoder = AntagonisticDecoder(self.action_dim, action_scale=ACTION_SCALE,
                                             channel_weights=resp_weights)
         self.pdi = PDI()
+        self.curiosity = NeuralCuriosity()
         self.episode_rewards = []
         self.best_reward = -np.inf
         self.top_channels = (channel_ranking[:DOPAMINE_TOP_K].tolist()
@@ -778,6 +799,7 @@ class CL1Agent:
             reward: Step reward from the environment.
         """
         if reward <= 0: return
+        self.neurons.inject_reward(reward)  # 奖励调制可塑性
         amp = np.clip(reward * 2.0, 0.5, 3.0)
         s = StimDesign(200, -amp, 200, amp)
         self.neurons.stim(ChannelSet(*self.top_channels), s,
@@ -798,6 +820,7 @@ class CL1Agent:
             penalty: Negative penalty magnitude (should be <= 0).
         """
         if penalty >= 0: return
+        self.neurons.inject_reward(penalty)  # 惩罚调制可塑性
         amp = np.clip(abs(penalty) * 1.5, 0.3, 2.0)
         # Select 8 random channels (excluding top_channels — noise, not signal)
         available = [ch for ch in range(64) if ch not in self.top_channels]
@@ -825,11 +848,13 @@ class CL1Agent:
             self.vie.adapt(cur_fr)
             vel = obs_info["eef_vel"]
             self.pdi.update(vel); pdi_val = self.pdi.compute()
-            # Pure PDI exploration boost (no software curiosity — let neurons handle novelty)
-            fep_boost = pdi_val * 0.4
+            self.curiosity.reset()
+            novelty = self.curiosity.compute_novelty(cur_fr)
+            # PDI + 好奇心联合驱动
+            fep_boost = pdi_val * 0.3 + novelty * 0.1
             raw = self.decoder.decode(spikes, pdi_boost=fep_boost)
-            # Pure antagonistic decode — let neurons do the learning via STDP
-            action = np.clip(raw * ACTION_SCALE, -1.0, 1.0)
+            # decoder 内部已完成缩放和裁剪，不再重复
+            action = raw
             obs, reward, terminated, truncated, info = self.env.step(action)
             obs_info = extract_obs(obs)
             total_reward += reward
@@ -985,10 +1010,6 @@ def train_ppo_baseline(record_last_n=RECORD_LAST_N):
             all_rewards.append(ep_r)
             max_d = max(ep_depths) if ep_depths else 0
             max_f = max(ep_forces) if ep_forces else 0
-            # HER-like hindsight bonus: partial credit for progress
-            if max_d > 0 and max_d <= INSERTION_DEPTH_THRESHOLD:
-                her_bonus = np.clip(max_d / INSERTION_DEPTH_THRESHOLD, 0.0, 0.8) * 0.3
-                all_rewards[-1] += her_bonus
             sr = 100.0 if (max_d > INSERTION_DEPTH_THRESHOLD and max_f < FORCE_SAFETY_THRESHOLD) else 0.0
             fsr = 100.0 if max_f < FORCE_SAFETY_THRESHOLD else 0.0
             all_sr.append(sr); all_fsr.append(fsr)
@@ -1109,6 +1130,7 @@ def plot_learning_curves(cl1_r, ppo_r, rnd_r, path=PLOT_FILE,
 
 # ═══ Main Entry Point ═══
 def main():
+    np.random.seed(SEED)
     print("+" + "=" * 58 + "+")
     print("|  Project Senxe v4.0 — RoboSuite NutAssembly            |")
     print("|  Native Force/Torque — Ready for Real Robotic Arm       |")
