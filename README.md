@@ -109,7 +109,7 @@ python senxe_demo.py
 
 | Metric | Definition | Why It Matters |
 |:---:|:---|:---|
-| **Sample Efficiency** | Reward accumulated per episode across CL1 / PPO / Random | Biological neurons learn useful motor policies with orders-of-magnitude fewer samples than PPO |
+| **Sample Efficiency** | Reward accumulated per episode across CL1 / PPO / Random | Demonstrates the potential of biologically-inspired control heuristics to learn stable policies with high sample efficiency |
 | **Force Safety Rate (FSR)** | % of episodes where peak force stays below 20 N | Critical for real-world deployment — a policy that completes the task but damages the workpiece is useless |
 | **Success Rate** | % of episodes achieving insertion depth > 0.02 m AND force < 20 N | Dual criterion: task completion AND safety |
 
@@ -156,6 +156,8 @@ project-senxe/
 │   ├── decoder.py             # Antagonistic motor decoding (flexor/extensor)
 │   ├── pdi.py                 # Physical Disturbance Index (FEP explore/exploit)
 │   ├── curiosity.py           # Neural intrinsic curiosity (firing-pattern novelty)
+│   ├── vie.py                 # Virtual Interference Encoding module
+│   ├── hud.py                 # HUD rendering and Bloom pipeline
 │   └── video.py               # Video generation utilities
 ├── tests/
 │   ├── __init__.py
@@ -196,7 +198,8 @@ project-senxe/
 
 | Component | Module | Biological Basis |
 |:---|:---|:---|
-| **VIE Encoding** | `senxe_demo_robosuite.py` | Maps force → rate coding, torque → traveling waves (mechanoreceptor-inspired) |
+| **VIE Encoding** | `core/vie.py` | Maps force → rate coding, torque → traveling waves (mechanoreceptor-inspired) |
+| **HUD Rendering** | `core/hud.py` | Cold Cyberpunk Bloom visualization with EMA smoothing |
 | **Antagonistic Decoder** | `core/decoder.py` | Flexor/extensor differential + EMA smoothing (α-γ motor neuron model) |
 | **PDI + FEP** | `core/pdi.py` | Velocity/acceleration variance → explore/exploit (active inference) |
 | **Dopamine Injection** | `senxe_demo_robosuite.py` | Positive reward → structured burst on top-K channels (reward prediction error) |
