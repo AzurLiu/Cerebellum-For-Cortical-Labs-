@@ -31,8 +31,8 @@ Instead of writing code to calculate how the robot should move, we stream physic
 
 ## Core Philosophy
 
-### 1. Zero Software Fallbacks (Pure Biology)
-We do not simulate biology. The codebase strictly requires the Cortical Labs `cl-sdk`. If you do not have physical access to a real biological organoid, the code will refuse to execute. We have violently purged all "Mock" simulators and Deep Learning (PPO) training wheels.
+### 1. Unified Interface (Real Hardware & Official Simulation)
+We have violently purged all our custom `Mock` simulators and Deep Learning (PPO) training wheels. The codebase strictly interfaces through the official Cortical Labs `cl-sdk`. If you connect real biological hardware, it runs in 100% Pure Wetware mode. If physical hardware is absent, the SDK gracefully auto-detects and falls back to its official Poisson simulator, allowing researchers to test the architecture without physical wetware.
 
 ### 2. Neuromorphic Event-Driven Sparse Coding (VIE)
 The **Virtual Interference Encoding (VIE)** module translates continuous robotic force/torque sensory data into event-driven Delta Tracking. The culture only receives an electrical shock when physical parameters *change*, drastically improving Signal-to-Noise Ratio (SNR) and completely preventing global overstimulation seizures.
@@ -49,7 +49,7 @@ The 64 channels are perfectly balanced and mapped across the 7-DoF spatial and g
 ## Quick Start
 
 ### Hardware Requirements
-You **MUST** have access to Cortical Labs CL1 biological hardware.
+You do **NOT** strictly need access to Cortical Labs CL1 biological hardware to run the code. If hardware is not detected, the system will automatically fall back to the official `cl-sdk` simulator mode.
 
 ```bash
 # Clone and install
@@ -73,7 +73,7 @@ python senxe_demo_robosuite.py
 |:---:|:---|
 | `cl1_nutassembly.mp4` | CL1 bio-agent execution video with Cyberpunk F/T Bloom HUD overlay. |
 
-*(Note: Generating this video requires a successful run on the physical CL1 hardware).*
+*(Note: Generating a true biological video requires connecting to the physical CL1 hardware; otherwise, it will generate a simulated version).*
 
 ---
 
