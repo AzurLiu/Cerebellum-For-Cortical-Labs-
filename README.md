@@ -239,4 +239,4 @@ Built from scratch as an exploration into biological computation and neural moto
 
 ---
 
-Copyright © 2026 Azur (Jiahao). Licensed under [GNU AGPL v3](LICENSE).
+Copyright © 2026 Azur (Jiahao). Licensed under the [MIT License](LICENSE).
