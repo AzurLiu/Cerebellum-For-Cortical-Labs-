@@ -21,10 +21,15 @@ try:
 except ImportError:
     raise RuntimeError(
         "FATAL ERROR: cl-sdk is not installed. \n"
-        "This project requires real Cortical Labs biological hardware. \n"
-        "Mock simulators have been purged because they cannot accurately "
-        "model cross-channel synaptic plasticity."
+        "This project requires the official Cortical Labs SDK (cl-sdk) to run. \n"
+        "Please run: pip install cl-sdk"
     )
+
+def is_cl_simulator() -> bool:
+    """Returns True if cl-sdk is running in simulation mode (no hardware detected)."""
+    if CL_AVAILABLE and hasattr(_cl_sdk, 'is_simulator'):
+        return _cl_sdk.is_simulator()
+    return False
 
 @contextmanager
 def cl_open():

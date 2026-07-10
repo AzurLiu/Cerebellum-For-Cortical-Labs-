@@ -138,7 +138,7 @@ def _feathered_darken(frame, y0, y1, x0, x1, darkness=0.08, feather=12):
 def _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
                   distance=0.0, force_mag=0.0, torque_mag=0.0,
                   depth=0.0, success_rate=0.0, force_safe_rate=0.0,
-                  force_threshold=20.0):
+                  force_threshold=20.0, is_sim=False):
     """Minimalist military HUD — small scale, pure white, drop shadows.
     WARNING / DANGER text pulses with a sine-wave breathing effect
     and is drawn onto glow_layer for bloom."""
@@ -160,10 +160,18 @@ def _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
     line_h = 20  # increased vertical spacing for breathing room
 
     _hud_text(frame, f"EP {ep:03d}   R {reward:+.1f}", lx, ly, (255, 255, 255), 0.50)
+    
+    # ── Simulator Status Indicator ──
+    sim_y = ly + line_h
+    if is_sim:
+        _hud_text(frame, "[SIMULATOR MODE]", lx, sim_y, (80, 80, 255), 0.42)
+    else:
+        _hud_text(frame, "[PURE WETWARE]", lx, sim_y, (80, 255, 80), 0.42)
+
     _hud_text(frame, f"F {force_mag:5.1f}N  T {torque_mag:4.2f}Nm  D {depth:.3f}m",
-              lx, ly + line_h, (140, 240, 255), 0.42)
+              lx, sim_y + line_h, (140, 240, 255), 0.42)
     _hud_text(frame, f"SR {success_rate:3.0f}%  FSR {force_safe_rate:3.0f}%  PDI {pdi:.2f}",
-              lx, ly + line_h * 2, (100, 210, 230), 0.42)
+              lx, sim_y + line_h * 2, (100, 210, 230), 0.42)
 
     # ── Status badge — breathing pulse on WARNING/DANGER ──
     badge_x = lx + 300
@@ -475,7 +483,7 @@ def _overlay_evolution_heatmap(frame, glow_layer):
 def draw_overlay(frame, ep, reward, pdi, min_health, firing_rates, reward_history,
                  distance=0.0, force_mag=0.0, torque_mag=0.0, depth=0.0,
                  success_rate=0.0, force_safe_rate=0.0,
-                 force_vec=None, health_arr=None, force_threshold=20.0):
+                 force_vec=None, health_arr=None, force_threshold=20.0, is_sim=False):
     """v5.0 Cold Cyberpunk HUD — Global Bloom + EMA + Breathing + Zero Matplotlib.
 
     BLOOM PIPELINE:
@@ -510,7 +518,8 @@ def draw_overlay(frame, ep, reward, pdi, min_health, firing_rates, reward_histor
     _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
                   distance=distance, force_mag=force_mag, torque_mag=torque_mag,
                   depth=depth, success_rate=success_rate,
-                  force_safe_rate=force_safe_rate, force_threshold=force_threshold)
+                  force_safe_rate=force_safe_rate, force_threshold=force_threshold,
+                  is_sim=is_sim)
 
     # Heatmap
     _overlay_evolution_heatmap(frame, glow_layer)

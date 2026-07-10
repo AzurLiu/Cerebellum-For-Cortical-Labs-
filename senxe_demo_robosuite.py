@@ -180,9 +180,12 @@ class CL1Agent:
                     min_h = float(health_full.min()) if health_full is not None else 1.0
                     sr = np.mean(ep_successes) * 100
                     fsr = np.mean(ep_force_safe) * 100
-                    frame = draw_overlay_wrapper(frame, ep_num, total_reward, pdi_val, min_h, cur_fr,
-                                         step_rewards, distance=cur_dist,
-                                         success_rate=sr, is_sim=is_cl_simulator())
+                    frame = draw_overlay(frame, ep_num, total_reward, pdi_val, min_h, cur_fr,
+                                         step_rewards, distance=cur_dist, force_mag=force_mag,
+                                         torque_mag=torque_mag, depth=depth,
+                                         success_rate=sr, force_safe_rate=fsr,
+                                         force_vec=obs_info["force"], health_arr=health_full,
+                                         force_threshold=FORCE_SAFETY_THRESHOLD, is_sim=is_cl_simulator())
                     frames_list.append(frame)
 
             if terminated or truncated: break
