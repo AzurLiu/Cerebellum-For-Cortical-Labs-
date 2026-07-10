@@ -1,19 +1,15 @@
 """
 Senxe Cerebellum — Virtual Interference Encoding (VIE)
 ====================================================
-Maps physical sensor data (force, torque, position, goal) to neural
-stimulation patterns on a 64-channel MEA using biologically realistic
-coding schemes.
+Maps physical sensor data to neural stimulation patterns using 
+Neuromorphic Event-Driven Sparse Coding and Attention Multiplexing.
 
-Channel Layout (non-overlapping):
-    CH  0-5:  Force magnitude — rate coding
-    CH  6-11: Force per-axis — directional encoding
-    CH 12-15: Force transient — traveling wave (dynamic sliding feedback)
-    CH 16-27: Torque/friction — traveling wave temporal coding
-    CH 28-31: Velocity supplement (independent)
-    CH 32-46: End-effector position
-    CH 47-54: Goal direction (peg-to-hole delta vector)
-    CH 55-59: Insertion depth progress
+Channel Layout (Scattered via permutation):
+    CH  0-11: Force Deltas (Sparse event-driven)
+    CH 12-23: Torque Deltas (Sparse event-driven)
+    CH 24-27: Velocity Supplement
+    CH 28-54: Spatial Attention Array (27 ch, multiplexed for Nut/Peg)
+    CH 55-59: State Flag / Depth Encoding
     CH 60-63: Reserved
 
 Usage::
@@ -32,30 +28,18 @@ from core.neurons import ChannelSet, StimDesign, BurstDesign
 
 
 class VIE:
-    """Virtual Interference Encoding — maps physical sensor data to neural stimulation.
+    """Virtual Interference Encoding — Neuromorphic Implementation.
 
-    Encodes force, torque, position, goal direction, and insertion depth onto
-    a 64-channel MEA using biologically realistic coding schemes:
-
-    - CH 0-5:   Force magnitude → rate coding
-                (higher force → higher burst frequency, mimicking mechanoreceptors)
-    - CH 6-11:  Force per-axis → directional encoding
-    - CH 12-15: Force transient → traveling wave (dynamic sliding feedback)
-    - CH 16-27: Torque and friction → traveling wave temporal coding
-                (phase-delayed pulses simulate proprioceptive spindle fibers)
-    - CH 28-31: Velocity supplement (independent, not reusing torque channels)
-    - CH 32-46: End-effector absolute position → position encoding
-    - CH 47-54: Goal direction (peg-to-hole delta vector)
-    - CH 55-59: Insertion depth progress encoding
-    - CH 60-63: Reserved for future use
-
-    Includes online adaptive gain adjustment: channels with weak responses
-    get amplified, over-responsive channels get attenuated.
+    Features:
+    1. Sparse Event-Driven Coding: Channels only fire on physical deltas (changes)
+       to reduce MEA crosstalk and seizure-like global overstimulation.
+    2. Attention Multiplexing: A dedicated high-resolution 27-channel spatial 
+       array focuses entirely on the CURRENT goal (Nut when searching, Peg when transporting).
 
     Args:
         neurons: CL1 neurons instance (real or mock) with .stim() method.
-        force_threshold: Force safety threshold (N) for normalizing force encoding.
-        depth_threshold: Insertion depth threshold (m) for normalizing depth encoding.
+        force_threshold: Force safety threshold (N).
+        depth_threshold: Insertion depth threshold (m).
         raw_env: Optional raw RoboSuite environment reference.
     """
 
@@ -63,15 +47,12 @@ class VIE:
     _prng = np.random.RandomState(42)
     _all_channels = _prng.permutation(64).tolist()
     
-    CH_FORCE_MAG   = _all_channels[0:6]      # Force magnitude rate coding
-    CH_FORCE_AXIS  = _all_channels[6:12]     # Per-axis force direction encoding
-    CH_FORCE_WAVE  = _all_channels[12:16]    # Force transient traveling wave
-    CH_TORQUE      = _all_channels[16:28]    # Torque / friction
-    CH_VELOCITY    = _all_channels[28:32]    # Velocity supplement (independent)
-    CH_POSITION    = _all_channels[32:47]    # End-effector position
-    CH_GOALDIR     = _all_channels[47:55]    # Goal direction
-    CH_DEPTH       = _all_channels[55:60]    # Insertion depth
-    CH_RESERVED    = _all_channels[60:64]    # Reserved
+    CH_FORCE         = _all_channels[0:12]      # Sparse force deltas
+    CH_TORQUE        = _all_channels[12:24]     # Sparse torque deltas
+    CH_VELOCITY      = _all_channels[24:28]     # Velocity 
+    CH_SPATIAL       = _all_channels[28:55]     # 27ch Spatial Attention Array
+    CH_STATE         = _all_channels[55:60]     # Attention state / Depth
+    CH_RESERVED      = _all_channels[60:64]     # Reserved
 
     def __init__(self, neurons, force_threshold=20.0, depth_threshold=0.02,
                  raw_env=None):
@@ -79,139 +60,120 @@ class VIE:
         self.raw_env = raw_env
         self.force_threshold = force_threshold
         self.depth_threshold = depth_threshold
-        self.channel_gain = np.ones(64)      # Per-channel encoding gain (online-adjusted)
-        self.stim_history = np.zeros(64)     # Cumulative stimulation tracker
-        self.response_history = np.zeros(64) # Cumulative response tracker
+        self.channel_gain = np.ones(64)      
         self.adaptation_rate = 0.005
 
-    def encode(self, obs_info):
-        """Encode observation into neural stimulation patterns on the 64-ch MEA.
+        # Neuromorphic Delta Tracking
+        self.prev_force = np.zeros(3)
+        self.prev_torque = np.zeros(3)
+        self.prev_eef_pos = np.zeros(3)
+        
+        # Attention State Machine
+        # 0: SEARCHING (Target = Nut)
+        # 1: TRANSPORTING (Target = Peg)
+        self.attention_state = 0  
 
-        Converts force/torque/position/goal sensor readings into charge-balanced
-        biphasic pulse trains delivered across the channel groups. Force uses
-        rate coding (burst frequency proportional to magnitude), while torque
-        uses traveling-wave temporal coding with phase delays.
+    def encode(self, obs_info):
+        """Encode observation using sparse delta coding and attention multiplexing.
 
         Args:
             obs_info: Dictionary with keys 'eef_pos', 'eef_vel', 'force',
                       'torque', 'peg_to_hole', 'eef_to_nut' from extract_obs().
         """
-        eef_pos = obs_info["eef_pos"]; eef_vel = obs_info["eef_vel"]
-        force = obs_info["force"]; torque = obs_info["torque"]
+        eef_pos = obs_info["eef_pos"]
+        eef_vel = obs_info["eef_vel"]
+        force = obs_info["force"]
+        torque = obs_info["torque"]
         peg_to_hole = obs_info["peg_to_hole"]
-        force_mag = np.linalg.norm(force)
-        torque_mag = np.linalg.norm(torque)
-        dist = np.linalg.norm(peg_to_hole)
-        vel_mag = np.linalg.norm(eef_vel)
-        
         eef_to_nut = obs_info.get("eef_to_nut", np.zeros(3))
+        
+        force_mag = np.linalg.norm(force)
         nut_dist = np.linalg.norm(eef_to_nut)
 
-        direction = peg_to_hole / (dist + 1e-8)
-        stim = StimDesign(160, -1.0, 160, 1.0)
+        # ── 1. Attention State Machine ──
+        # Heuristic for grasping: close to nut AND feeling force
+        if self.attention_state == 0:
+            if nut_dist < 0.05 and force_mag > 5.0:
+                self.attention_state = 1  # Switch to TRANSPORTING
+        else:
+            # If we drop it, switch back to SEARCHING
+            if force_mag < 1.0:
+                self.attention_state = 0  
 
-        # ══ Force Magnitude — Rate Coding (CH 0-5) ══
-        fnorm = np.clip(force_mag / self.force_threshold, 0.0, 1.5)
-        fhz = int(np.clip(50 + 350 * fnorm, 50, 400))
-        fn = max(1, min(10, int(fnorm * 8 * self.channel_gain[self.CH_FORCE_MAG[0]])))
-        self.neurons.stim(ChannelSet(*self.CH_FORCE_MAG), stim, BurstDesign(fn, fhz))
+        active_target_vec = eef_to_nut if self.attention_state == 0 else peg_to_hole
 
-        # ══ Force Axis Encoding (CH 6-11) — per-axis direction ══
+        # ── 2. Sparse Event-Driven Delta Coding ──
+        d_force = force - self.prev_force
+        d_torque = torque - self.prev_torque
+        
+        self.prev_force = force.copy()
+        self.prev_torque = torque.copy()
+        self.prev_eef_pos = eef_pos.copy()
+
+        # Encode Force Deltas (CH 0-11: 4 channels per axis for pos/neg changes)
         for ax in range(3):
-            ch1 = self.CH_FORCE_AXIS[ax * 2]
-            ch2 = self.CH_FORCE_AXIS[ax * 2 + 1]
-            chs = ChannelSet(*[ch1, ch2])
-            f = force[ax]; inten = np.clip(abs(f) / (self.force_threshold / 3), 0.1, 2.0)
-            fs = StimDesign(160, -inten * np.sign(f), 160, inten * np.sign(f))
-            fb = BurstDesign(max(1, int(abs(f) / 3)), int(50 + abs(f) * 15))
-            self.neurons.stim(chs, fs, fb)
+            df = d_force[ax]
+            if abs(df) > 0.5:  # Noise threshold
+                ch_idx = self.CH_FORCE[ax * 4 + (0 if df > 0 else 2)]
+                inten = np.clip(abs(df) * 0.5, 0.1, 2.0)
+                hz = int(np.clip(50 + abs(df) * 20, 50, 300))
+                fs = StimDesign(160, -inten, 160, inten)
+                self.neurons.stim(ChannelSet(ch_idx), fs, BurstDesign(2, hz))
 
-        # ══ Force Wave Encoding (CH 12-15) — dynamic sliding feedback ══
-        if force_mag > 0.05:
-            for wave_i in range(4):
-                ch_idx = self.CH_FORCE_WAVE[wave_i]
-                phase_delay_ms = 1.0 + 3.0 * (wave_i / 3.0)
-                wave_freq = int(np.clip(40 + 160 * fnorm, 40, 200))
-                wave_amp = np.clip(fnorm * 0.6, 0.05, 1.2)
-                wave_stim = StimDesign(
-                    int(160 + phase_delay_ms * 10), -wave_amp,
-                    int(160 + phase_delay_ms * 10),  wave_amp
-                )
-                self.neurons.stim(ChannelSet(ch_idx), wave_stim, BurstDesign(1, wave_freq))
+        # Encode Torque Deltas (CH 12-23)
+        for ax in range(3):
+            dt = d_torque[ax]
+            if abs(dt) > 0.1:
+                ch_idx = self.CH_TORQUE[ax * 4 + (0 if dt > 0 else 2)]
+                inten = np.clip(abs(dt) * 2.0, 0.1, 2.0)
+                hz = int(np.clip(50 + abs(dt) * 50, 50, 300))
+                ts = StimDesign(160, -inten, 160, inten)
+                self.neurons.stim(ChannelSet(ch_idx), ts, BurstDesign(2, hz))
 
-        # ══ Torque/Friction — Traveling Waves (CH 16-27) ══
-        if torque_mag > 0.01:
-            for ax in range(3):
-                t = torque[ax]
-                if abs(t) > 0.01:
-                    chs_list = self.CH_TORQUE[ax * 4 : (ax + 1) * 4]
-                    chs = ChannelSet(*chs_list)
-                    cb = chs_list[0]
-                    inten = np.clip(abs(t) * 3.0 * self.channel_gain[cb], 0.1, 2.0)
-                    ws = StimDesign(160, -inten, 160, inten)
-                    whz = int(np.clip(60 * abs(t), 20, 200))
-                    self.neurons.stim(chs, ws, BurstDesign(2, whz))
-
-        # ══ Velocity Supplement (CH 28-31) — independent, no reuse ══
+        # Encode Velocity (Continuous but sparse via threshold) (CH 24-27)
         vmag = np.linalg.norm(eef_vel)
-        if vmag > 0.003:
+        if vmag > 0.01:
             for ax in range(3):
                 v = eef_vel[ax]
-                if abs(v) > 0.003 and ax < len(self.CH_VELOCITY):
+                if abs(v) > 0.01:
                     cb = self.CH_VELOCITY[ax]
-                    vi = np.clip(abs(v) * 5, 0.1, 2.0)
+                    vi = np.clip(abs(v) * 3, 0.1, 2.0)
                     vs = StimDesign(160, -vi, 160, vi)
                     vhz = int(np.clip(60 * abs(v), 20, 200))
-                    self.neurons.stim(ChannelSet(cb), vs, BurstDesign(2, vhz))
+                    self.neurons.stim(ChannelSet(cb), vs, BurstDesign(1, vhz))
 
-        # ══ Position Encoding (CH 32-46) ══
+        # ── 3. High-Resolution Spatial Attention Array (CH 28-54) ──
+        # 27 channels = 9 channels per axis. We distribute the target vector component across them.
         for ax in range(3):
-            chs_list = self.CH_POSITION[ax * 5 : (ax + 1) * 5]
-            chs = ChannelSet(*chs_list)
-            cb = chs_list[0]
-            p = eef_pos[ax]; g = self.channel_gain[cb]
-            phz = int(np.clip((100 + 200 * abs(p)) * g, 50, 350))
-            ps = StimDesign(160, -abs(p) * 0.8 * g, 160, abs(p) * 0.8 * g)
-            self.neurons.stim(chs, ps, BurstDesign(2, phz))
+            val = active_target_vec[ax]
+            # Which of the 9 channels to fire? based on val tuning curve.
+            # Map val from [-0.5, 0.5] to bin index [0, 8]
+            bin_idx = int(np.clip((val + 0.5) * 9, 0, 8))
+            ch_idx = self.CH_SPATIAL[ax * 9 + bin_idx]
+            
+            # Fire strongly if we are exactly in this bin
+            hz = int(np.clip(100 + abs(val) * 200, 50, 350))
+            inten = np.clip(0.5 + abs(val), 0.1, 1.5)
+            ps = StimDesign(160, -inten, 160, inten)
+            self.neurons.stim(ChannelSet(ch_idx), ps, BurstDesign(2, hz))
 
-        # ══ Goal Direction (CH 47-54) ══
-        for ax in range(3):
-            chs_list = self.CH_GOALDIR[ax * 2 : (ax + 1) * 2]
-            chs = ChannelSet(*chs_list)
-            cb = chs_list[0]
-            d = direction[ax]; inten = np.clip((abs(d) * 1.5 + 0.1) * self.channel_gain[cb], 0.1, 2.0)
-            ds = StimDesign(160, -inten * np.sign(d), 160, inten * np.sign(d))
-            db = BurstDesign(max(1, int(abs(d) * 5)), int(50 + abs(d) * 100))
-            self.neurons.stim(chs, ds, db)
+        # ── 4. State Flag & Depth (CH 55-59) ──
+        # Let the network know WHICH attention state it's currently in
+        state_ch = self.CH_STATE[self.attention_state]
+        self.neurons.stim(ChannelSet(state_ch), StimDesign(160, -1.0, 160, 1.0), BurstDesign(2, 100))
 
-        # ══ Insertion Depth (CH 55-59) ══
-        depth = self._compute_depth(obs_info)
-        dn = np.clip(depth / self.depth_threshold, 0.0, 2.0)
-        dg = np.mean(self.channel_gain[self.CH_DEPTH[:5]])
-        dhz = int(np.clip((50 + 300 * dn) * dg, 50, 400)); dnn = max(1, int(dn * 6 * dg))
-        dstim = StimDesign(160, -0.8, 160, 0.8)
-        self.neurons.stim(ChannelSet(*self.CH_DEPTH), dstim, BurstDesign(dnn, dhz))
-
-        # ══ Nut Distance (CH 60-63) - Crucial for NutAssembly Task ══
-        # Encodes proximity to the nut so the agent can find it
-        nd_norm = np.clip(1.0 / (nut_dist + 0.05), 0.0, 20.0)
-        nd_hz = int(np.clip(50 + 15 * nd_norm, 50, 350))
-        nd_inten = np.clip(nd_norm * 0.1, 0.1, 1.5)
-        nd_stim = StimDesign(160, -nd_inten, 160, nd_inten)
-        self.neurons.stim(ChannelSet(*self.CH_RESERVED), nd_stim, BurstDesign(2, nd_hz))
+        if self.attention_state == 1:
+            # If transporting, encode depth explicitly to guide insertion
+            depth = self._compute_depth(obs_info)
+            if depth > 0.01:
+                dn = np.clip(depth / self.depth_threshold, 0.0, 2.0)
+                dhz = int(np.clip(50 + 300 * dn, 50, 400))
+                dstim = StimDesign(160, -0.8, 160, 0.8)
+                self.neurons.stim(ChannelSet(self.CH_STATE[2]), dstim, BurstDesign(2, dhz))
 
     def adapt(self, firing_rates):
-        """Online adaptation of channel encoding gains.
-
-        Implements homeostatic gain control: under-responsive channels get
-        amplified, over-responsive channels get attenuated. Target is uniform
-        response (~0.5 normalized) across all channels.
-
-        Args:
-            firing_rates: Per-channel firing rates, shape (64,).
-        """
+        """Online adaptation of channel encoding gains (Homeostasis)."""
         fr_norm = firing_rates / (firing_rates.max() + 1e-6)
-        # Target: uniform response across channels (~0.5 normalized)
         error = 0.5 - fr_norm
         self.channel_gain += self.adaptation_rate * error
         self.channel_gain = np.clip(self.channel_gain, 0.3, 3.0)
@@ -221,3 +183,4 @@ class VIE:
         """Compute insertion depth from peg-to-hole distance."""
         d = np.linalg.norm(obs_info["peg_to_hole"])
         return max(0.0, 0.1 - d)
+
