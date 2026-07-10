@@ -30,6 +30,8 @@ from core.decoder import AntagonisticDecoder
 from core.pdi import PDI
 from core.curiosity import NeuralCuriosity
 from core.video import save_video, make_side_by_side
+from core.vie import VIE
+from core.hud import draw_overlay, hud
 
 # ═══ Configuration ═══
 SEED            = 42
@@ -89,686 +91,13 @@ def extract_obs(obs):
 def compute_insertion_depth(info):
     d = np.linalg.norm(info["peg_to_hole"]); return max(0.0, 0.1 - d), d
 
-# ═══ CL1 Neural Interface — now from core/ (see core/neurons.py) ═══
-
-# ═══ VIE: Virtual Interference Encoding ═══
-# v4.0: Native force/torque sensor encoding (industrial tactile feedback)
-# CH 0-15: Force (rate coding) | CH 16-31: Torque/friction (traveling waves)
-# CH 32-47: Position           | CH 48-63: Goal direction + insertion depth
-
-class VIE:
-    """Virtual Interference Encoding — maps physical sensor data to neural stimulation.
-
-    Encodes force, torque, position, goal direction, and insertion depth onto
-    a 64-channel MEA using biologically realistic coding schemes:
-
-    - CH 0-15:  Force magnitude and per-axis force → rate coding
-                (higher force → higher burst frequency, mimicking mechanoreceptors)
-    - CH 16-31: Torque and friction → traveling wave temporal coding
-                (phase-delayed pulses simulate proprioceptive spindle fibers)
-    - CH 32-47: End-effector absolute position → position encoding
-    - CH 48-55: Goal direction (peg-to-hole delta vector)
-    - CH 56-63: Insertion depth progress encoding
-
-    Includes online adaptive gain adjustment: channels with weak responses
-    get amplified, over-responsive channels get attenuated.
-    """
-
-    # 清晰的通道布局 — 无重叠
-    CH_FORCE_MAG   = list(range(0, 6))     # 力幅度速率编码
-    CH_FORCE_AXIS  = list(range(6, 12))    # 每轴力方向编码
-    CH_FORCE_WAVE  = list(range(12, 16))   # 力行波编码（缩减）
-    CH_TORQUE      = list(range(16, 28))   # 扭矩/摩擦
-    CH_VELOCITY    = list(range(28, 32))   # 速度补充（独立，不复用扭矩尾部）
-    CH_POSITION    = list(range(32, 47))   # 末端执行器位置
-    CH_GOALDIR     = list(range(47, 55))   # 目标方向
-    CH_DEPTH       = list(range(55, 60))   # 插入深度
-    CH_RESERVED    = list(range(60, 64))   # 预留
-
-    def __init__(self, neurons, raw_env=None):
-        self.neurons = neurons; self.raw_env = raw_env
-        self.channel_gain = np.ones(64)    # Per-channel encoding gain (online-adjusted)
-        self.stim_history = np.zeros(64)   # Cumulative stimulation tracker
-        self.response_history = np.zeros(64)  # Cumulative response tracker
-        self.adaptation_rate = 0.005
-
-    def encode(self, obs_info):
-        """Encode observation into neural stimulation patterns on the 64-ch MEA.
-
-        Converts force/torque/position/goal sensor readings into charge-balanced
-        biphasic pulse trains delivered across the channel groups. Force uses
-        rate coding (burst frequency proportional to magnitude), while torque
-        uses traveling-wave temporal coding with phase delays.
-
-        Args:
-            obs_info: Dictionary with keys 'eef_pos', 'eef_vel', 'force',
-                      'torque', 'peg_to_hole' from extract_obs().
-        """
-        eef_pos = obs_info["eef_pos"]; eef_vel = obs_info["eef_vel"]
-        force = obs_info["force"]; torque = obs_info["torque"]
-        peg_to_hole = obs_info["peg_to_hole"]
-        distance = np.linalg.norm(peg_to_hole)
-        direction = peg_to_hole / (distance + 1e-8)
-        stim = StimDesign(160, -1.0, 160, 1.0)
-
-        # ══ Force Magnitude — Rate Coding (CH 0-5) ══
-        force_mag = np.linalg.norm(force)
-        fnorm = np.clip(force_mag / FORCE_SAFETY_THRESHOLD, 0.0, 1.5)
-        fhz = int(np.clip(50 + 350 * fnorm, 50, 400))
-        fn = max(1, min(10, int(fnorm * 8 * self.channel_gain[self.CH_FORCE_MAG[0]])))
-        self.neurons.stim(ChannelSet(*self.CH_FORCE_MAG), stim, BurstDesign(fn, fhz))
-
-        # ══ Force Axis Encoding (CH 6-11) — per-axis direction ══
-        for ax in range(3):
-            cb = self.CH_FORCE_AXIS[ax * 2]
-            chs = ChannelSet(*[cb, cb + 1])
-            f = force[ax]; inten = np.clip(abs(f) / (FORCE_SAFETY_THRESHOLD / 3), 0.1, 2.0)
-            fs = StimDesign(160, -inten * np.sign(f), 160, inten * np.sign(f))
-            fb = BurstDesign(max(1, int(abs(f) / 3)), int(50 + abs(f) * 15))
-            self.neurons.stim(chs, fs, fb)
-
-        # ══ Force Wave Encoding (CH 12-15) — dynamic sliding feedback ══
-        if force_mag > 0.05:
-            for wave_i in range(4):
-                ch_idx = self.CH_FORCE_WAVE[wave_i]
-                phase_delay_ms = 1.0 + 3.0 * (wave_i / 3.0)
-                wave_freq = int(np.clip(40 + 160 * fnorm, 40, 200))
-                wave_amp = np.clip(fnorm * 0.6, 0.05, 1.2)
-                wave_stim = StimDesign(
-                    int(160 + phase_delay_ms * 10), -wave_amp,
-                    int(160 + phase_delay_ms * 10),  wave_amp
-                )
-                self.neurons.stim(ChannelSet(ch_idx), wave_stim, BurstDesign(1, wave_freq))
-
-        # ══ Torque/Friction — Traveling Waves (CH 16-27) ══
-        tmag = np.linalg.norm(torque)
-        if tmag > 0.01:
-            for ax in range(3):
-                t = torque[ax]
-                if abs(t) > 0.01:
-                    cb = self.CH_TORQUE[0] + ax * 4
-                    chs = ChannelSet(*range(cb, min(cb + 4, 28)))
-                    inten = np.clip(abs(t) * 3.0 * self.channel_gain[cb], 0.1, 2.0)
-                    ws = StimDesign(160, -inten, 160, inten)
-                    whz = int(np.clip(60 * abs(t), 20, 200))
-                    self.neurons.stim(chs, ws, BurstDesign(2, whz))
-
-        # ══ Velocity Supplement (CH 28-31) — independent, no reuse ══
-        vmag = np.linalg.norm(eef_vel)
-        if vmag > 0.003:
-            for ax in range(3):
-                v = eef_vel[ax]
-                if abs(v) > 0.003 and ax < len(self.CH_VELOCITY):
-                    cb = self.CH_VELOCITY[ax]
-                    vi = np.clip(abs(v) * 5, 0.1, 2.0)
-                    vs = StimDesign(160, -vi, 160, vi)
-                    vhz = int(np.clip(60 * abs(v), 20, 200))
-                    self.neurons.stim(ChannelSet(cb), vs, BurstDesign(2, vhz))
-
-        # ══ Position Encoding (CH 32-46) ══
-        for ax in range(3):
-            cb = self.CH_POSITION[0] + ax * 5
-            chs = ChannelSet(*range(cb, min(cb + 5, 47)))
-            p = eef_pos[ax]; g = self.channel_gain[cb]
-            phz = int(np.clip((100 + 200 * abs(p)) * g, 50, 350))
-            ps = StimDesign(160, -abs(p) * 0.8 * g, 160, abs(p) * 0.8 * g)
-            self.neurons.stim(chs, ps, BurstDesign(2, phz))
-
-        # ══ Goal Direction (CH 47-54) ══
-        for ax in range(3):
-            cb = self.CH_GOALDIR[0] + ax * 2
-            chs = ChannelSet(*[cb, min(cb + 1, 54)])
-            d = direction[ax]; inten = np.clip((abs(d) * 1.5 + 0.1) * self.channel_gain[cb], 0.1, 2.0)
-            ds = StimDesign(160, -inten * np.sign(d), 160, inten * np.sign(d))
-            db = BurstDesign(max(1, int(abs(d) * 5)), int(50 + abs(d) * 100))
-            self.neurons.stim(chs, ds, db)
-
-        # ══ Insertion Depth (CH 55-59) ══
-        depth, _ = compute_insertion_depth(obs_info)
-        dn = np.clip(depth / INSERTION_DEPTH_THRESHOLD, 0.0, 2.0)
-        dg = np.mean(self.channel_gain[self.CH_DEPTH[:5]])
-        dhz = int(np.clip((50 + 300 * dn) * dg, 50, 400)); dnn = max(1, int(dn * 6 * dg))
-        dstim = StimDesign(160, -0.8, 160, 0.8)
-        self.neurons.stim(ChannelSet(*self.CH_DEPTH), dstim, BurstDesign(dnn, dhz))
-
-    def adapt(self, firing_rates):
-        """Online adaptation of channel encoding gains.
-
-        Implements homeostatic gain control: under-responsive channels get
-        amplified, over-responsive channels get attenuated. Target is uniform
-        response (~0.5 normalized) across all channels.
-
-        Args:
-            firing_rates: Per-channel firing rates, shape (64,).
-        """
-        fr_norm = firing_rates / (firing_rates.max() + 1e-6)
-        # Target: uniform response across channels (~0.5 normalized)
-        error = 0.5 - fr_norm
-        self.channel_gain += self.adaptation_rate * error
-        self.channel_gain = np.clip(self.channel_gain, 0.3, 3.0)
-
-# ═══ AntagonisticDecoder, PDI, NeuralCuriosity — now from core/ ═══
-# (see core/decoder.py, core/pdi.py, core/curiosity.py)
-
-# ═══ HUD Overlay System ═══
-# v5.0 Cold Cyberpunk HUD — Bloom + EMA + Breathing + Zero Matplotlib
-# Inspired by native macOS AppKit fluid aesthetics (Sense_CL1_Integrated.py)
-# ═══════════════════════════════════════════════════════════════════════
-#
-# ARCHITECTURE:
-#   1. All high-intensity elements are drawn onto a separate black `glow_layer`.
-#   2. The glow_layer is Gaussian-blurred, then additively blended back
-#      onto the main frame — producing a hardware-accelerated-looking bloom.
-#   3. The force gauge cursor uses EMA smoothing for fluid "inertia" motion.
-#   4. Critical UI labels pulse via `np.sin(time * freq)` for a "breathing" feel.
-#   5. The evolution heatmap is a pure cv2 scrolling sparkline — zero Matplotlib.
-# ═══════════════════════════════════════════════════════════════════════
-
-import time as _time  # for breathing pulse, safe re-import
-
-# ── Module-level persistent state ──
-_overlay_frame_counter = [0]                # Global frame tick
-_particle_pool = []                         # Particle system pool
-_last_spike_time = np.zeros(64)             # Per-channel last-spike timestamp
-_force_ema = [0.0]                          # EMA-smoothed force magnitude for gauge
-_FORCE_EMA_ALPHA = 0.18                     # EMA coefficient: lower = smoother glide
-
-# ── Channel Evolution — pure cv2 sparkline (replaces Matplotlib heatmap) ──
-# Accumulator: list of (64,) firing rate arrays, one per completed episode.
-# Referenced externally by CL1Agent.run_episode — DO NOT RENAME.
-_episode_firing_history = []
-_evolution_cache = [None, 0]                # [cached_image, last_update_ep_count]
-
-# ── Cold Cyberpunk 4-color semantic palette (RGB order) ──
-# Force=Ice Blue | Torque=Neon Cyan | Position=Magenta | Goal=Muted Amber
-_GROUP_COLORS = {
-    'force':    {'echo': (255, 255, 255), 'active': (180, 210, 255), 'inactive': (20, 30, 50)},
-    'torque':   {'echo': (255, 255, 255), 'active': (0,   255, 240), 'inactive': (5,  40, 38)},
-    'position': {'echo': (255, 255, 255), 'active': (220, 80,  220), 'inactive': (38, 12, 38)},
-    'goal':     {'echo': (255, 255, 255), 'active': (220, 185, 90),  'inactive': (40, 32, 12)},
-}
-_CH_GROUP_MAP = ['force'] * 16 + ['torque'] * 16 + ['position'] * 16 + ['goal'] * 16
-
-# Bloom kernel size (must be odd). Larger = softer glow, more GPU-like feel.
-_BLOOM_KSIZE = 31
-_BLOOM_SIGMA = 12
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Helper: Drop-shadow text (military HUD typography)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _hud_text(target, text, x, y, color=(255, 255, 255),
-              scale=0.35, thickness=1, font=cv2.FONT_HERSHEY_SIMPLEX):
-    """Render pixel-perfect HUD text with a 2px black drop shadow for depth."""
-    # Shadow pass (1px down-right offset, thick black outline for contrast)
-    cv2.putText(target, text, (x + 1, y + 1), font, scale,
-                (0, 0, 0), thickness + 2, cv2.LINE_AA)
-    # Foreground pass
-    cv2.putText(target, text, (x, y), font, scale,
-                color, thickness, cv2.LINE_AA)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Particle system — spawn + update + draw onto glow_layer for bloom
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _spawn_particles(cx, cy, count, color_base, speed=1.8, life_range=(10, 22)):
-    """Spawn radial particles around (cx, cy). Drawn onto glow_layer for bloom."""
-    for _ in range(count):
-        angle = np.random.uniform(0, 2 * np.pi)
-        spd = np.random.uniform(0.4, speed)
-        lf = np.random.randint(life_range[0], life_range[1])
-        _particle_pool.append(dict(
-            x=float(cx) + np.random.uniform(-3, 3),
-            y=float(cy) + np.random.uniform(-3, 3),
-            vx=np.cos(angle) * spd, vy=np.sin(angle) * spd,
-            life=lf, max_life=lf, color_base=color_base
-        ))
-
-
-def _update_and_draw_particles(frame, glow_layer):
-    """Advance physics & render particles onto glow_layer for additive bloom."""
-    h, w = frame.shape[:2]
-    alive = []
-    for p in _particle_pool:
-        p['x'] += p['vx']; p['y'] += p['vy']; p['life'] -= 1
-        p['vx'] *= 0.93; p['vy'] *= 0.93          # drag
-        if p['life'] <= 0:
-            continue
-        px, py = int(p['x']), int(p['y'])
-        if px < 4 or py < 4 or px >= w - 4 or py >= h - 4:
-            continue
-        t = p['life'] / p['max_life']               # 1.0→0.0 fade
-        cb = p['color_base']
-        brightness = t * 0.85
-        r = max(2, int(3 * t))
-        color = (int(cb[0] * brightness),
-                 int(cb[1] * brightness),
-                 int(cb[2] * brightness))
-        cv2.circle(glow_layer, (px, py), r + 1, color, -1, cv2.LINE_AA)
-        alive.append(p)
-    _particle_pool.clear()
-    _particle_pool.extend(alive)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Feathered darken (unchanged utility, used for subtle panel backdrops)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _feathered_darken(frame, y0, y1, x0, x1, darkness=0.08, feather=12):
-    """Darken a rectangular ROI with feathered edges for a frosted-glass effect."""
-    h, w = frame.shape[:2]
-    y0, y1 = max(0, y0), min(h, y1)
-    x0, x1 = max(0, x0), min(w, x1)
-    rh, rw = y1 - y0, x1 - x0
-    if rh <= 0 or rw <= 0:
-        return
-    alpha = np.ones((rh, rw), dtype=np.float32)
-    f = min(feather, rh // 2, rw // 2)
-    for i in range(f):
-        t = (i + 1) / (f + 1)
-        alpha[i, :] = np.minimum(alpha[i, :], t)
-        alpha[rh - 1 - i, :] = np.minimum(alpha[rh - 1 - i, :], t)
-        alpha[:, i] = np.minimum(alpha[:, i], t)
-        alpha[:, rw - 1 - i] = np.minimum(alpha[:, rw - 1 - i], t)
-    factor = darkness + (1.0 - darkness) * (1.0 - alpha)
-    roi = frame[y0:y1, x0:x1].astype(np.float32)
-    roi *= factor[:, :, np.newaxis]
-    frame[y0:y1, x0:x1] = np.clip(roi, 0, 255).astype(np.uint8)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  HUD Text Overlay — Military-grade precision typography
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
-                  distance=0.0, force_mag=0.0, torque_mag=0.0,
-                  depth=0.0, success_rate=0.0, force_safe_rate=0.0):
-    """Minimalist military HUD — small scale, pure white, drop shadows.
-    WARNING / DANGER text pulses with a sine-wave breathing effect
-    and is drawn onto glow_layer for bloom."""
-    h, w = frame.shape[:2]
-    fc = _overlay_frame_counter[0]
-    curr_time = fc / 30.0
-
-    # ── Safety classification ──
-    fn = force_mag / FORCE_SAFETY_THRESHOLD if FORCE_SAFETY_THRESHOLD > 0 else 0
-    if fn < 0.5:
-        status, s_color = "NOMINAL", (160, 220, 160)
-    elif fn < 1.0:
-        status, s_color = "CAUTION", (220, 200, 80)
-    else:
-        status, s_color = "DANGER", (255, 80, 80)
-
-    # ── Top-left HUD block (3 lines, larger + brighter for 720p legibility) ──
-    lx, ly = 12, 22
-    line_h = 20  # increased vertical spacing for breathing room
-
-    _hud_text(frame, f"EP {ep:03d}   R {reward:+.1f}", lx, ly, (255, 255, 255), 0.50)
-    _hud_text(frame, f"F {force_mag:5.1f}N  T {torque_mag:4.2f}Nm  D {depth:.3f}m",
-              lx, ly + line_h, (140, 240, 255), 0.42)
-    _hud_text(frame, f"SR {success_rate:3.0f}%  FSR {force_safe_rate:3.0f}%  PDI {pdi:.2f}",
-              lx, ly + line_h * 2, (100, 210, 230), 0.42)
-
-    # ── Status badge — breathing pulse on WARNING/DANGER ──
-    badge_x = lx + 300
-    badge_y = ly
-    if fn >= 0.5:
-        # Breathing: sinusoidal alpha modulation (0.5–1.0 range)
-        breath = 0.5 + 0.5 * np.sin(curr_time * 5.0)      # ~0.8 Hz pulse
-        pulse_color = tuple(int(c * breath) for c in s_color)
-        # Draw on glow_layer for bloom halo around warning text
-        _hud_text(glow_layer, status, badge_x, badge_y, pulse_color, 0.40, 1)
-    _hud_text(frame, status, badge_x, badge_y, s_color, 0.40, 1)
-
-    # ── Bottom-left: minimal health indicator ──
-    _hud_text(frame, f"HEALTH {min_health:.2f}", lx, h - 12, (100, 110, 120), 0.30)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  8×8 Neuron Grid — Circles + Cold Cyberpunk + Bloom spikes
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _overlay_neuron_grid(frame, firing_rates, min_health, glow_layer,
-                         health_arr=None, force_mag=0.0):
-    """8×8 neuron grid rendered as sleek circles with Cold Cyberpunk palette.
-    Force=Ice Blue | Torque=Neon Cyan | Position=Magenta | Goal=Muted Amber.
-    Spiking neurons flash WHITE with heavy colored bloom, then smoothly decay.
-    Right-side force safety gauge with EMA-smoothed cursor."""
-    h, w = frame.shape[:2]
-    fc = _overlay_frame_counter[0]
-    curr_time = fc / 30.0
-
-    # ── Grid geometry ──
-    radius = 6                              # circle radius (px)
-    spacing = 16                            # center-to-center distance
-    grid_n = 8
-    total = grid_n * spacing                # 128px
-    gauge_w = 6; gauge_gap = 10
-    gx0, gy0 = 14, 86                      # origin (pushed down for breathing room below HUD)
-
-    if gy0 + total + 5 > h or gx0 + total + gauge_gap + gauge_w + 5 > w:
-        return
-
-    # ── Spike detection + echo decay ──
-    spike_thresh = np.percentile(firing_rates, 75)
-    spiking = firing_rates > spike_thresh
-    for ch in range(64):
-        if spiking[ch]:
-            _last_spike_time[ch] = curr_time
-
-    echo_decay = np.zeros(64, dtype=np.float32)
-    for ch in range(64):
-        dt = curr_time - _last_spike_time[ch]
-        # Smooth exponential decay over 0.45s — longer tail than before
-        echo_decay[ch] = max(0.0, 1.0 - dt / 0.70)
-
-    fr_median = np.median(firing_rates)
-    fr_range = max(firing_rates.max() - firing_rates.min(), 1.0)
-
-    # ── Pure black background behind the entire grid area ──
-    pad = 4  # padding around the grid
-    bg_x0 = max(0, gx0 - pad)
-    bg_y0 = max(0, gy0 - pad)
-    bg_x1 = min(w, gx0 + total + pad)
-    bg_y1 = min(h, gy0 + total + pad)
-    frame[bg_y0:bg_y1, bg_x0:bg_x1] = 0
-
-    # ── Draw 8×8 circle grid ──
-    for row in range(grid_n):
-        for col in range(grid_n):
-            ch = row * grid_n + col
-            cx = gx0 + col * spacing + radius
-            cy = gy0 + row * spacing + radius
-
-            if cx + radius >= w or cy + radius >= h:
-                continue
-
-            group = _CH_GROUP_MAP[ch]
-            colors = _GROUP_COLORS[group]
-            ed = echo_decay[ch]
-            fr = firing_rates[ch]
-
-            if ed > 0.05:
-                # ── STATE A: Spike echo — flash white → decay to active color ──
-                ec = colors['echo']   # pure white
-                ac = colors['active']
-                t = ed                # 1.0 at spike, decays to 0
-                cr = int(ec[0] * t + ac[0] * (1 - t))
-                cg = int(ec[1] * t + ac[1] * (1 - t))
-                cb_c = int(ec[2] * t + ac[2] * (1 - t))
-                # Draw filled circle on frame
-                cv2.circle(frame, (cx, cy), radius, (cr, cg, cb_c), -1, cv2.LINE_AA)
-                # ── BLOOM: Draw high-intensity version onto glow_layer ──
-                bloom_brightness = ed * 1.2
-                bloom_color = (int(min(255, ac[0] * bloom_brightness)),
-                               int(min(255, ac[1] * bloom_brightness)),
-                               int(min(255, ac[2] * bloom_brightness)))
-                cv2.circle(glow_layer, (cx, cy), radius + 5, bloom_color, -1, cv2.LINE_AA)
-                # Spawn particles on recent spikes (ed > 0.65 for wider emission window)
-                if ed > 0.65:
-                    _spawn_particles(cx, cy, 3, ac, speed=2.0, life_range=(8, 16))
-
-            elif fr > fr_median:
-                # ── STATE B: Active — saturated group color, thin stroke ──
-                ac = colors['active']
-                intensity = np.clip((fr - fr_median) / (fr_range * 0.5 + 1e-6), 0, 1)
-                alpha = 0.55 + intensity * 0.45
-                cr = int(ac[0] * alpha)
-                cg = int(ac[1] * alpha)
-                cb_c = int(ac[2] * alpha)
-                cv2.circle(frame, (cx, cy), radius, (cr, cg, cb_c), -1, cv2.LINE_AA)
-                # Ultra-thin bright stroke for definition
-                cv2.circle(frame, (cx, cy), radius, ac, 1, cv2.LINE_AA)
-            else:
-                # ── STATE C: Inactive — ghost circle, barely visible stroke ──
-                ic = colors['inactive']
-                cv2.circle(frame, (cx, cy), radius, ic, 1, cv2.LINE_AA)
-
-    # ── Force Safety Gauge (right of grid) — EMA-smoothed cursor ──
-    #
-    # EMA LOGIC: Instead of directly mapping force_mag to the bar fill,
-    # we smoothly interpolate using an exponential moving average.
-    # _force_ema[0] = alpha * new_value + (1 - alpha) * old_value
-    # Lower alpha → smoother/slower response (more "inertia").
-    raw_fn = np.clip(force_mag / FORCE_SAFETY_THRESHOLD, 0, 1.5)
-    _force_ema[0] = _FORCE_EMA_ALPHA * raw_fn + (1.0 - _FORCE_EMA_ALPHA) * _force_ema[0]
-    smoothed_fn = _force_ema[0]
-
-    bar_x = gx0 + total + gauge_gap
-    bar_y0 = gy0
-    bar_h = total
-    fill_h = int(bar_h * min(smoothed_fn, 1.0))
-
-    if bar_x + gauge_w <= w and bar_y0 + bar_h <= h:
-        # Subtle darkened background track
-        _feathered_darken(frame, bar_y0, bar_y0 + bar_h, bar_x - 1, bar_x + gauge_w + 1,
-                          darkness=0.12, feather=4)
-
-        # Draw gradient fill from bottom upward
-        if fill_h > 0:
-            fill_top = bar_y0 + bar_h - fill_h
-            for py in range(fill_top, bar_y0 + bar_h):
-                t = (bar_y0 + bar_h - py) / bar_h  # 0=bottom, 1=top
-                # Cold gradient: Ice-blue(0) → Cyan(0.5) → Magenta-red(1.0)
-                if t < 0.5:
-                    t2 = t * 2.0
-                    cr = int(80 + 100 * t2)
-                    cg = int(200 + 55 * (1 - t2))
-                    cb_c = int(255 - 30 * t2)
-                else:
-                    t2 = (t - 0.5) * 2.0
-                    cr = int(180 + 75 * t2)
-                    cg = int(140 * (1 - t2))
-                    cb_c = int(225 * (1 - t2) + 60 * t2)
-                for px in range(bar_x, min(bar_x + gauge_w, w)):
-                    frame[py, px] = [cr, cg, cb_c]
-
-        # Threshold line at 100% — crisp white dash
-        thresh_y = bar_y0
-        if 0 <= thresh_y < h:
-            cv2.line(frame, (bar_x - 2, thresh_y), (bar_x + gauge_w + 2, thresh_y),
-                     (200, 200, 200), 1, cv2.LINE_AA)
-
-        # Floating cursor for current smoothed force (horizontal tick mark)
-        cursor_y = int(bar_y0 + bar_h - bar_h * min(smoothed_fn, 1.3))
-        cursor_y = max(bar_y0, min(bar_y0 + bar_h - 1, cursor_y))
-        cursor_color = (255, 255, 255)
-        if smoothed_fn > 1.0:
-            # Danger: pulsing red cursor on glow_layer
-            breath = 0.6 + 0.4 * np.sin(curr_time * 8.0)
-            cursor_color = (int(255 * breath), int(60 * breath), int(60 * breath))
-            cv2.line(glow_layer, (bar_x - 4, cursor_y), (bar_x + gauge_w + 4, cursor_y),
-                     (255, 80, 80), 2, cv2.LINE_AA)
-        cv2.line(frame, (bar_x - 3, cursor_y), (bar_x + gauge_w + 3, cursor_y),
-                 cursor_color, 2, cv2.LINE_AA)
-
-        # Tiny force label next to gauge
-        _hud_text(frame, f"{force_mag:.0f}N", bar_x - 2, bar_y0 + bar_h + 14,
-                  (160, 170, 180), 0.28)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  Channel Evolution — Pure cv2 scrolling sparkline (ZERO Matplotlib)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_EVOLUTION_WINDOW = 50   # Show last N episodes as scrolling sparkline columns
-
-# Sparkline group colors (BGR for cv2) — matches the Cold Cyberpunk palette
-_SPARK_COLORS = [
-    (255, 210, 180),   # Force  — Ice Blue (BGR)
-    (240, 255, 0),     # Torque — Neon Cyan (BGR)
-    (220, 80, 220),    # Position — Magenta (BGR)
-    (90, 185, 220),    # Goal   — Muted Amber (BGR)
-]
-_SPARK_LABELS = ['F', 'T', 'P', 'G']
-
-
-def _overlay_evolution_heatmap(frame, glow_layer):
-    """Channel Evolution — Pure cv2 scrolling dot-matrix sparkline.
-    4 rows (Force/Torque/Position/Goal), each a horizontal sparkline
-    of per-episode average firing rate. Cached per-episode for speed."""
-    h, w = frame.shape[:2]
-    n_eps = len(_episode_firing_history)
-    if n_eps < 2:
-        return
-
-    # ── Panel geometry (top-right) ──
-    panel_w, panel_h = 200, 100
-    margin_r, margin_t = 10, 10
-    px0 = w - panel_w - margin_r
-    py0 = margin_t
-
-    if px0 < w // 3 or py0 + panel_h > h:
-        return
-
-    # Only re-render when new episode data arrives (cached)
-    need_update = (_evolution_cache[0] is None or _evolution_cache[1] != n_eps)
-
-    if need_update:
-        _evolution_cache[1] = n_eps
-
-        window = min(n_eps, _EVOLUTION_WINDOW)
-        recent = np.array(_episode_firing_history[-window:])  # (window, 64)
-
-        # Group into 4 channel banks: mean firing rate per bank per episode
-        # Force(0-15), Torque(16-31), Position(32-47), Goal(48-63)
-        grouped = np.zeros((4, window), dtype=np.float32)
-        for gi, (lo, hi) in enumerate([(0, 16), (16, 32), (32, 48), (48, 64)]):
-            grouped[gi] = recent[:, lo:hi].mean(axis=1)
-
-        # Per-row normalize to [0, 1] for sparkline height
-        for gi in range(4):
-            mn, mx = grouped[gi].min(), grouped[gi].max()
-            rng = mx - mn if (mx - mn) > 0.5 else 0.5
-            grouped[gi] = (grouped[gi] - mn) / rng
-
-        # Render onto a small black canvas
-        canvas = np.zeros((panel_h, panel_w, 3), dtype=np.uint8)
-        row_h = panel_h // 4  # 25px per sparkline row
-
-        for gi in range(4):
-            base_y = gi * row_h
-            color = _SPARK_COLORS[gi]
-            vals = grouped[gi]
-
-            # Draw sparkline as connected dots
-            x_step = max(1.0, (panel_w - 24) / max(window - 1, 1))
-            pts = []
-            for si in range(window):
-                sx = int(20 + si * x_step)
-                # Map normalized value to vertical position within row
-                sy = int(base_y + row_h - 3 - vals[si] * (row_h - 6))
-                pts.append((sx, sy))
-
-                # Dot-matrix trail: small filled circles
-                brightness = 0.3 + 0.7 * (si / max(window - 1, 1))  # fade-in
-                dot_color = tuple(int(c * brightness) for c in color)
-                cv2.circle(canvas, (sx, sy), 2, dot_color, -1, cv2.LINE_AA)
-
-            # Connect with thin line
-            if len(pts) > 1:
-                for i in range(len(pts) - 1):
-                    t = (i + 1) / len(pts)
-                    line_color = tuple(int(c * t * 0.5) for c in color)
-                    cv2.line(canvas, pts[i], pts[i + 1], line_color, 1, cv2.LINE_AA)
-
-            # Latest point gets a bright glow dot
-            if pts:
-                lx, ly = pts[-1]
-                cv2.circle(canvas, (lx, ly), 3, color, -1, cv2.LINE_AA)
-
-            # Row label (left side)
-            label_y = base_y + row_h // 2 + 4
-            cv2.putText(canvas, _SPARK_LABELS[gi], (3, label_y),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.30, color, 1, cv2.LINE_AA)
-
-            # Subtle separator line
-            if gi < 3:
-                sep_y = base_y + row_h
-                cv2.line(canvas, (18, sep_y), (panel_w - 4, sep_y),
-                         (30, 35, 40), 1, cv2.LINE_AA)
-
-        # Episode range label at bottom
-        start_ep = max(1, n_eps - window + 1)
-        ep_label = f"ep {start_ep}-{n_eps}"
-        cv2.putText(canvas, ep_label, (panel_w - 70, panel_h - 4),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.25, (80, 90, 100), 1, cv2.LINE_AA)
-
-        _evolution_cache[0] = canvas
-
-    # ── Alpha blend cached sparkline panel onto frame ──
-    cached = _evolution_cache[0]
-    if cached is not None:
-        ch_h, ch_w = cached.shape[:2]
-        y_end = min(py0 + ch_h, h)
-        x_end = min(px0 + ch_w, w)
-        ah = y_end - py0; aw = x_end - px0
-        if ah > 0 and aw > 0:
-            # Darken backdrop for contrast
-            _feathered_darken(frame, py0, y_end, px0, x_end, darkness=0.06, feather=8)
-            # Blend sparkline canvas (only non-black pixels to preserve transparency)
-            roi = frame[py0:y_end, px0:x_end].astype(np.float32)
-            overlay = cached[:ah, :aw].astype(np.float32)
-            # Additive-style blend: wherever overlay is bright, add it
-            mask = (overlay.max(axis=2, keepdims=True) > 10).astype(np.float32)
-            blended = roi * (1.0 - mask * 0.7) + overlay * 0.9
-            frame[py0:y_end, px0:x_end] = np.clip(blended, 0, 255).astype(np.uint8)
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-#  MAIN ENTRY: draw_overlay — Global Bloom Pipeline
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def draw_overlay(frame, ep, reward, pdi, min_health, firing_rates, reward_history,
-                 distance=0.0, force_mag=0.0, torque_mag=0.0, depth=0.0,
-                 success_rate=0.0, force_safe_rate=0.0,
-                 force_vec=None, health_arr=None):
-    """v5.0 Cold Cyberpunk HUD — Global Bloom + EMA + Breathing + Zero Matplotlib.
-
-    BLOOM PIPELINE:
-      1. Create a black glow_layer (same size as frame).
-      2. Draw high-intensity elements (spike flashes, warning text, danger cursor)
-         onto this glow_layer.
-      3. Apply fast cv2.GaussianBlur to glow_layer → produces soft glow halos.
-      4. Additively blend glow_layer back onto the main frame using cv2.add().
-    This emulates the hardware-accelerated bloom seen in native macOS AppKit UIs.
-
-    EMA SMOOTHING:
-      The force gauge cursor uses exponential moving average so the indicator
-      glides with physical "inertia" instead of jittering per-frame.
-      Formula: ema = alpha * new + (1 - alpha) * old   (alpha = 0.18)
-    """
-    frame = np.ascontiguousarray(frame)
-    _overlay_frame_counter[0] += 1
-
-    # ── Step 1: Allocate glow layer (black canvas, same dims) ──
-    glow_layer = np.zeros_like(frame)
-
-    # ── Step 2: Draw all UI components ──
-    # Neuron grid draws spiking neurons + force gauge onto glow_layer
-    _overlay_neuron_grid(frame, firing_rates, min_health, glow_layer,
-                         health_arr=health_arr, force_mag=force_mag)
-
-    # Particles are drawn onto glow_layer for bloom effect
-    _update_and_draw_particles(frame, glow_layer)
-
-    # HUD text (warning/danger text drawn onto glow_layer for bloom)
-    _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
-                  distance=distance, force_mag=force_mag, torque_mag=torque_mag,
-                  depth=depth, success_rate=success_rate,
-                  force_safe_rate=force_safe_rate)
-
-    # ── Step 3: Blur the glow layer → soft bloom halos ──
-    bloom = cv2.GaussianBlur(glow_layer, (_BLOOM_KSIZE, _BLOOM_KSIZE), _BLOOM_SIGMA)
-
-    # ── Step 4: Additive blend → premium glowing edges ──
-    # cv2.add() clamps at 255 automatically, which is exactly what we want
-    # for additive light blending (like real optical bloom).
-    frame = cv2.add(frame, bloom)
-
-    return frame
-
 # ═══ CL1 Biological Agent ═══
 class CL1Agent:
     def __init__(self, env, raw_env, neurons, channel_ranking=None, responsiveness=None):
         self.env = env; self.raw_env = raw_env; self.neurons = neurons
         self.action_dim = env.action_space.shape[0]
-        self.vie = VIE(neurons, raw_env=raw_env)
+        self.vie = VIE(neurons, force_threshold=FORCE_SAFETY_THRESHOLD,
+                       depth_threshold=INSERTION_DEPTH_THRESHOLD, raw_env=raw_env)
         # P1: Population Vector — pass calibration responsiveness as decode weights
         resp_weights = responsiveness if channel_ranking is not None else None
         self.decoder = AntagonisticDecoder(self.action_dim, action_scale=ACTION_SCALE,
@@ -799,7 +128,8 @@ class CL1Agent:
             reward: Step reward from the environment.
         """
         if reward <= 0: return
-        self.neurons.inject_reward(reward)  # 奖励调制可塑性
+        if hasattr(self.neurons, 'inject_reward'):
+            self.neurons.inject_reward(min(reward, 1.0))
         amp = np.clip(reward * 2.0, 0.5, 3.0)
         s = StimDesign(200, -amp, 200, amp)
         self.neurons.stim(ChannelSet(*self.top_channels), s,
@@ -820,7 +150,8 @@ class CL1Agent:
             penalty: Negative penalty magnitude (should be <= 0).
         """
         if penalty >= 0: return
-        self.neurons.inject_reward(penalty)  # 惩罚调制可塑性
+        if hasattr(self.neurons, 'inject_reward'):
+            self.neurons.inject_reward(max(penalty, -1.0))
         amp = np.clip(abs(penalty) * 1.5, 0.3, 2.0)
         # Select 8 random channels (excluding top_channels — noise, not signal)
         available = [ch for ch in range(64) if ch not in self.top_channels]
@@ -833,7 +164,7 @@ class CL1Agent:
     def run_episode(self, max_steps=CL1_MAX_STEPS, record=False, ep_num=0):
         obs, _ = self.env.reset()
         obs_info = extract_obs(obs)
-        self.pdi.reset(); self.decoder.reset()
+        self.pdi.reset(); self.decoder.reset(); self.curiosity.reset()
         total_reward = 0.0; frames_list = []
         ep_successes = []; ep_force_safe = []
         step_rewards = deque(maxlen=50); cur_fr = np.zeros(64)
@@ -848,7 +179,6 @@ class CL1Agent:
             self.vie.adapt(cur_fr)
             vel = obs_info["eef_vel"]
             self.pdi.update(vel); pdi_val = self.pdi.compute()
-            self.curiosity.reset()
             novelty = self.curiosity.compute_novelty(cur_fr)
             # PDI + 好奇心联合驱动
             fep_boost = pdi_val * 0.3 + novelty * 0.1
@@ -902,7 +232,8 @@ class CL1Agent:
                                      step_rewards, distance=cur_dist, force_mag=force_mag,
                                      torque_mag=torque_mag, depth=depth,
                                      success_rate=sr, force_safe_rate=fsr,
-                                     force_vec=obs_info["force"], health_arr=health_full)
+                                     force_vec=obs_info["force"], health_arr=health_full,
+                                     force_threshold=FORCE_SAFETY_THRESHOLD)
                 frames_list.append(frame)
 
             if terminated or truncated: break
@@ -913,7 +244,7 @@ class CL1Agent:
         # Record episode average firing rates for evolution heatmap
         if ep_firing_acc:
             ep_avg_fr = np.mean(ep_firing_acc, axis=0)
-            _episode_firing_history.append(ep_avg_fr)
+            hud.episode_firing_history.append(ep_avg_fr)
 
         success_rate = np.mean(ep_successes) * 100 if ep_successes else 0.0
         force_safe_rate = np.mean(ep_force_safe) * 100 if ep_force_safe else 100.0
@@ -1131,6 +462,7 @@ def plot_learning_curves(cl1_r, ppo_r, rnd_r, path=PLOT_FILE,
 # ═══ Main Entry Point ═══
 def main():
     np.random.seed(SEED)
+    hud.reset()
     print("+" + "=" * 58 + "+")
     print("|  Project Senxe v4.0 — RoboSuite NutAssembly            |")
     print("|  Native Force/Torque — Ready for Real Robotic Arm       |")

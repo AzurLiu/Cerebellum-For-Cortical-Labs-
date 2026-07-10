@@ -51,14 +51,17 @@ class TestMockNeurons:
         n.read(50, None)
         assert n.timestamp == 150
 
-    def test_stim_increases_sensitivity(self):
-        n = MockNeurons()
-        initial_sens = n.sensitivity[0]
+    def test_stim_then_read_changes_sensitivity(self):
+        n = MockNeurons(seed=42)
+        initial_sens = n.sensitivity[0].copy()
         cs = MockChannelSet(0)
         sd = MockStimDesign(160, -1.0, 160, 1.0)
         bd = MockBurstDesign(5, 200)
         n.stim(cs, sd, bd)
-        assert n.sensitivity[0] > initial_sens
+        # Plasticity now happens during read() via STDP, not in stim()
+        n.read(100, None)
+        # Sensitivity should have changed (direction depends on timing)
+        assert n.sensitivity[0] != initial_sens
 
     def test_stim_only_affects_target_channels(self):
         n = MockNeurons()
@@ -101,6 +104,44 @@ class TestMockNeurons:
         assert buf_before > 0
         n.read(100, None)
         assert n.stim_buffer[5] < buf_before  # decayed by 0.3x
+
+    def test_inject_reward_positive(self):
+        n = MockNeurons()
+        n.inject_reward(0.8)
+        assert n._reward_trace == 0.8
+
+    def test_inject_reward_clips(self):
+        n = MockNeurons()
+        n.inject_reward(5.0)
+        assert n._reward_trace == 1.0
+        n.inject_reward(-5.0)
+        assert n._reward_trace == -1.0
+
+    def test_reward_trace_decays(self):
+        n = MockNeurons()
+        n.inject_reward(1.0)
+        n.read(100, None)
+        assert n._reward_trace < 1.0  # decayed by 0.95
+        assert n._reward_trace > 0.9
+
+    def test_sensitivity_stays_in_bounds(self):
+        n = MockNeurons(seed=42)
+        cs = MockChannelSet(0)
+        sd = MockStimDesign(160, -2.0, 160, 2.0)
+        bd = MockBurstDesign(20, 500)
+        for _ in range(200):
+            n.stim(cs, sd, bd)
+            n.inject_reward(1.0)
+            n.read(50, None)
+        assert np.all(n.sensitivity >= 100.0)
+        assert np.all(n.sensitivity <= 400.0)
+
+    def test_seed_reproducibility(self):
+        n1 = MockNeurons(seed=42)
+        n2 = MockNeurons(seed=42)
+        f1 = n1.read(100, None)
+        f2 = n2.read(100, None)
+        assert np.array_equal(f1, f2)
 
 
 class TestMockTypes:
