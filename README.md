@@ -73,8 +73,8 @@ graph TB
     Act -->|env.step| RS
     Noise -->|Perturbation| Act
     RS -->|Reward & Collisions| FB["Stimulus Reinforcement"]
-    FB -->|Predictable Stim (Reward)| MEA
-    FB -->|Unpredictable Noise (Penalty)| MEA
+    FB -->|Predictable Stim| MEA
+    FB -->|Unpredictable Noise| MEA
 
     %% Styles
     classDef envStyle fill:#0b132b,stroke:#48cae4,stroke-width:2px,color:#fff;
