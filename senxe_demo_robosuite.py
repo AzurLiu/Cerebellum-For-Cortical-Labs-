@@ -49,7 +49,7 @@ RENDER_W        = 720;  RENDER_H = 720        # Render resolution
 INSERTION_DEPTH_THRESHOLD = 0.02
 FORCE_SAFETY_THRESHOLD    = 20.0
 TORQUE_SAFETY_THRESHOLD   = 5.0
-DOPAMINE_TOP_K  = 8;  DOPAMINE_BURST_N = 15;  DOPAMINE_BURST_HZ = 300
+PREDICTABLE_STIM_TOP_K  = 8;  PREDICTABLE_BURST_N = 15;  PREDICTABLE_BURST_HZ = 300
 
 # ═══ RoboSuite Environment ═══
 def make_robosuite_env(render=False):
@@ -106,8 +106,8 @@ class CL1Agent:
         self.curiosity = NeuralCuriosity()
         self.episode_rewards = []
         self.best_reward = -np.inf
-        self.top_channels = (channel_ranking[:DOPAMINE_TOP_K].tolist()
-                             if channel_ranking is not None else list(range(DOPAMINE_TOP_K)))
+        self.top_channels = (channel_ranking[:PREDICTABLE_STIM_TOP_K].tolist()
+                             if channel_ranking is not None else list(range(PREDICTABLE_STIM_TOP_K)))
 
     def _detect_spikes(self):
         frames = self.neurons.read(250, None)
@@ -117,7 +117,7 @@ class CL1Agent:
         return spike_channels, firing_rates
 
     def _predictable_stim_inject(self, reward):
-        """Dopamine-like reward injection — positive reinforcement pathway.
+        """Predictable stimulus injection — positive reinforcement pathway.
 
         When reward > 0, delivers structured burst stimulation to the top-K
         calibrated channels. Under the Free Energy Principle, predictable
@@ -133,10 +133,10 @@ class CL1Agent:
         amp = np.clip(reward * 2.0, 0.5, 3.0)
         s = StimDesign(200, -amp, 200, amp)
         self.neurons.stim(ChannelSet(*self.top_channels), s,
-                          BurstDesign(DOPAMINE_BURST_N, DOPAMINE_BURST_HZ))
+                          BurstDesign(PREDICTABLE_BURST_N, PREDICTABLE_BURST_HZ))
 
     def _unpredictable_stim_inject(self, penalty):
-        """Punishment noise injection — negative reinforcement pathway.
+        """Unpredictable Stimulus noise injection — negative reinforcement pathway.
 
         When a negative event occurs (force violation, increasing distance,
         large negative reward), delivers unpredictable random-frequency
@@ -169,7 +169,7 @@ class CL1Agent:
         ep_successes = []; ep_force_safe = []
         step_rewards = deque(maxlen=50); cur_fr = np.zeros(64)
         ep_firing_acc = []  # Accumulate per-step firing rates for evolution heatmap
-        prev_dist = None  # Track distance change for punishment
+        prev_dist = None  # Track distance change for unpredictable stimulus
 
         for step in range(max_steps):
             self.vie.encode(obs_info)
@@ -199,18 +199,18 @@ class CL1Agent:
             ep_force_safe.append(1 if force_safe else 0)
             step_rewards.append(reward)
 
-            # === Dual feedback: Dopamine (positive) + Punishment (negative) ===
+            # === Dual feedback: Predictable Stimulus (positive) + Unpredictable Stimulus (negative) ===
             # Positive: reward > 0 → structured burst on top-K channels
             self._predictable_stim_inject(reward)
             # Negative: force exceeds safety OR distance increasing → random noise
-            punishment = 0.0
+            unpredictable stimulus = 0.0
             if force_mag > FORCE_SAFETY_THRESHOLD:
-                punishment -= (force_mag - FORCE_SAFETY_THRESHOLD) * 0.5
+                unpredictable stimulus -= (force_mag - FORCE_SAFETY_THRESHOLD) * 0.5
             if prev_dist is not None and cur_dist > prev_dist + 0.005:
-                punishment -= (cur_dist - prev_dist) * 10.0
+                unpredictable stimulus -= (cur_dist - prev_dist) * 10.0
             if reward < -1.0:
-                punishment += reward * 0.3  # already negative
-            self._unpredictable_stim_inject(punishment)
+                unpredictable stimulus += reward * 0.3  # already negative
+            self._unpredictable_stim_inject(unpredictable stimulus)
             prev_dist = cur_dist
 
             if record:
@@ -258,7 +258,7 @@ class CL1Agent:
         print(f"  Episodes: {num_episodes} | Env: {ENV_NAME} ({ROBOT})")
         backend = "Cortical Labs cl-sdk" if CL_AVAILABLE else "Built-in mock"
         print(f"  Backend:  {backend}")
-        print(f"  Modules:  VIE(Adaptive) + PopVector + PDI + Dopamine/Punishment (FEP dual-feedback)")
+        print(f"  Modules:  VIE(Adaptive) + PopVector + PDI + Predictable/Unpredictable Stim (FEP dual-feedback)")
         print(f"  Record:   last {record_last_n} mature episodes\n")
 
         all_frames = []; all_sr = []; all_fsr = []
@@ -415,7 +415,7 @@ def plot_learning_curves(cl1_r, ppo_r, rnd_r, path=PLOT_FILE,
     ax.plot(ppo_r, alpha=0.12, color='#3498db')
     ax.plot(rnd_r, alpha=0.12, color='#95a5a6')
     ax.plot(range(off, off+len(cl1_s)), cl1_s, color='#e74c3c', lw=2.5,
-            label='CL1 Bio (VIE+Force/Torque+Dopamine)')
+            label='CL1 Bio (VIE+Force/Torque+Predictable Stimulus)')
     ax.plot(range(off, off+len(ppo_s)), ppo_s, color='#3498db', lw=2.5,
             label='PPO Traditional RL')
     ax.plot(range(off, off+len(rnd_s)), rnd_s, color='#95a5a6', lw=2.0, ls='--',

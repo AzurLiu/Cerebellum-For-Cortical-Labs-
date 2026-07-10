@@ -183,7 +183,7 @@ senxe-cerebellum/
 │       ▲                                │                │      │
 │       │                          ┌─────▼─────┐    ┌─────▼────┐ │
 │       │                          │ Predictable / │    │  Action  │ │
-│       └──────────────────────────│ Punishment │◀───│  Output  │ │
+│       └──────────────────────────│ Unpredictable Stimulus │◀───│  Output  │ │
 │              (env.step)          │ Injection  │    │ (7D OSC) │ │
 │                                  └─────┬─────┘    └──────────┘ │
 │                                        │                       │

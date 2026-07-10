@@ -8,7 +8,7 @@ Demonstrates key biological control components:
   - VIE  (Virtual Interference Encoding)   — Doom-style visual + tactile encoding
   - Antagonistic Decoding                  — Flexor/extensor motor output
   - PDI  (Physical Disturbance Index)      — FEP-inspired explore/exploit gate
-  - Dopamine-like Reward Injection         — Structured burst reinforcement
+  - Predictable stimulus injection         — Structured burst reinforcement
   - Channel Warm-up Calibration            — 10-second responsiveness probing
   - Metabolic Guardrail                    — Per-channel health monitoring
 
@@ -60,10 +60,10 @@ RECORD_LAST_N     = 100                      # Only record last N mature episode
 WARMUP_SECONDS    = 10                       # Channel warm-up calibration duration (seconds)
 ACTION_SCALE      = 0.35                     # Action scaling factor
 
-# Dopamine reward injection parameters
-DOPAMINE_TOP_K    = 8                        # Stimulate top-K responsive channels on reward
-DOPAMINE_BURST_N  = 15                       # Dopamine burst pulse count
-DOPAMINE_BURST_HZ = 300                      # Dopamine burst frequency (Hz)
+# Predictable stimulus injection parameters
+PREDICTABLE_STIM_TOP_K    = 8                        # Stimulate top-K responsive channels on reward
+PREDICTABLE_BURST_N  = 15                       # Predictable Stimulus burst pulse count
+PREDICTABLE_BURST_HZ = 300                      # Predictable Stimulus burst frequency (Hz)
 
 # ═══ CL1 Neural Interface — see core/neurons.py ═══
 
@@ -384,7 +384,7 @@ def draw_overlay(frame, ep, reward, pdi, min_health, firing_rates, reward_histor
 #   VIE encode → read spikes → PDI → FEP boost → antagonistic decode → execute
 #
 # Key features:
-#   - Dopamine reward injection: structured burst on top-K calibrated channels
+#   - Predictable stimulus injection: structured burst on top-K calibrated channels
 #   - Channel calibration: 10s warm-up to rank channel responsiveness
 
 class CL1Agent:
@@ -407,9 +407,9 @@ class CL1Agent:
 
         # Channel calibration results — used for predictable stimulus injection targeting
         if channel_ranking is not None:
-            self.top_channels = channel_ranking[:DOPAMINE_TOP_K].tolist()
+            self.top_channels = channel_ranking[:PREDICTABLE_STIM_TOP_K].tolist()
         else:
-            self.top_channels = list(range(DOPAMINE_TOP_K))
+            self.top_channels = list(range(PREDICTABLE_STIM_TOP_K))
 
     def _detect_spikes(self):
         """Read 10ms of neural data and detect spiking channels.
@@ -430,7 +430,7 @@ class CL1Agent:
         return spike_channels, firing_rates
 
     def _predictable_stim_inject(self, reward):
-        """Dopamine-like reward injection — positive reinforcement pathway.
+        """Predictable stimulus injection — positive reinforcement pathway.
 
         When reward > 0, delivers structured burst stimulation to the top-K
         calibrated channels. Under the FEP framework, positive reward indicates
@@ -444,7 +444,7 @@ class CL1Agent:
         # Stronger reward → stronger stimulation intensity
         amp = np.clip(reward * 2.0, 0.5, 3.0)
         stim = StimDesign(200, -amp, 200, amp)  # Wider pulse for predictable stimulus burst
-        burst = BurstDesign(DOPAMINE_BURST_N, DOPAMINE_BURST_HZ)
+        burst = BurstDesign(PREDICTABLE_BURST_N, PREDICTABLE_BURST_HZ)
         self.neurons.stim(ChannelSet(*self.top_channels), stim, burst)
 
     def run_episode(self, max_steps=CL1_MAX_STEPS, record=False, ep_num=0):
@@ -503,7 +503,7 @@ class CL1Agent:
             # Record per-step reward (for HUD rolling curve)
             step_rewards.append(reward)
 
-            # 7. Dopamine-like reward injection (reward > 0 → reinforce active pathway)
+            # 7. Predictable stimulus injection (reward > 0 → reinforce active pathway)
             self._predictable_stim_inject(reward)
 
             # 8. Record video frame with HUD overlay
@@ -725,7 +725,7 @@ def plot_learning_curves(cl1_rewards, ppo_rewards, random_rewards, path=PLOT_FIL
     # Smoothed curves (rolling average)
     ax.plot(range(off, off + len(cl1_s)), cl1_s,
             color='#e74c3c', lw=2.5,
-            label='CL1 Bio-Computer (VIE + Antagonistic + Dopamine)')
+            label='CL1 Bio-Computer (VIE + Antagonistic + Predictable Stimulus)')
     ax.plot(range(off, off + len(ppo_s)), ppo_s,
             color='#3498db', lw=2.5,
             label='PPO Traditional RL')

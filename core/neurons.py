@@ -372,7 +372,7 @@ def warmup_calibration(
 
     - **Population vector decoding**: Weighting spike contributions by
       channel quality (more responsive channels contribute more).
-    - **Dopamine injection targeting**: Reward signals are delivered to
+    - **Predictable Stimulus injection targeting**: Reward signals are delivered to
       the top-K most responsive channels for maximum effect.
 
     Phase 1 (Baseline): Read spontaneous activity without stimulation
