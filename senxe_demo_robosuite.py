@@ -38,7 +38,7 @@ FORCE_SAFETY_THRESHOLD    = 20.0
 TORQUE_SAFETY_THRESHOLD   = 5.0
 PREDICTABLE_STIM_TOP_K    = 8
 PREDICTABLE_BURST_N       = 15
-PREDICTABLE_BURST_HZ      = 200
+PREDICTABLE_BURST_HZ      = 300
 
 # ═══ RoboSuite Environment ═══
 def make_robosuite_env(render=False):
@@ -132,7 +132,7 @@ class CL1Agent:
         available = [ch for ch in range(64) if ch not in self.top_channels]
         random_chs = np.random.choice(available, size=min(8, len(available)), replace=False).tolist()
         stim = StimDesign(160, -amp, 160, amp)
-        burst = BurstDesign(np.random.randint(3, 10), np.random.randint(50, 201))
+        burst = BurstDesign(np.random.randint(3, 10), np.random.randint(50, 300))
         self.neurons.stim(ChannelSet(*random_chs), stim, burst)
 
     def run_episode(self, max_steps=MAX_STEPS, record=False, ep_num=0):

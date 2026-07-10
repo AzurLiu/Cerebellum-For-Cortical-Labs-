@@ -14,6 +14,12 @@ import numpy as np
 from contextlib import contextmanager
 from typing import Tuple
 
+# Compatibility shim: cl-sdk uses np.bool which was removed in numpy 2.0
+if not hasattr(np, 'bool'):
+    np.bool = np.bool_
+if not hasattr(np, 'concat'):
+    np.concat = np.concatenate
+
 try:
     import cl as _cl_sdk
     from cl import ChannelSet, StimDesign, BurstDesign
@@ -26,10 +32,18 @@ except ImportError:
     )
 
 def is_cl_simulator() -> bool:
-    """Returns True if cl-sdk is running in simulation mode (no hardware detected)."""
-    if CL_AVAILABLE and hasattr(_cl_sdk, 'is_simulator'):
-        return _cl_sdk.is_simulator()
-    return False
+    """Returns True if cl-sdk is running in simulation mode (no real CL1 hardware).
+    
+    Detection: The official cl-sdk ships as a mock/simulator that replays
+    Poisson-sampled recordings. We detect this by checking whether the
+    Neurons class has the mock-only '_replay_file' attribute in its
+    annotations, which only exists in the simulator implementation.
+    """
+    try:
+        from cl.neurons import Neurons
+        return '_replay_file' in getattr(Neurons, '__annotations__', {})
+    except Exception:
+        return False
 
 @contextmanager
 def cl_open():
