@@ -154,26 +154,37 @@ def _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
     else:
         status, s_color = "DANGER", (80, 80, 200)
 
-    # ── Top-left HUD block (3 lines, larger + brighter for 720p legibility) ──
-    lx, ly = 12, 22
-    line_h = 20  # increased vertical spacing for breathing room
+    # ── High-Tech Telemetry Glass Panel Backing ──
+    tp_x0, tp_y0 = 8, 8
+    tp_x1, tp_y1 = 390, 88
+    # Dark transparent blend
+    roi = frame[tp_y0:tp_y1, tp_x0:tp_x1]
+    frame[tp_y0:tp_y1, tp_x0:tp_x1] = (roi * 0.12).astype(np.uint8)
+    # Draw border
+    cv2.rectangle(frame, (tp_x0, tp_y0), (tp_x1, tp_y1), (60, 60, 60), 1, cv2.LINE_AA)
+    # Tag header
+    _hud_text(frame, "TELEMETRY PANEL", tp_x0 + 6, tp_y0 - 4, (120, 120, 120), 0.28)
+
+    # ── Top-left HUD block ──
+    lx, ly = 20, 28
+    line_h = 18
 
     _hud_text(frame, f"EP {ep:03d}   R {reward:+.1f}", lx, ly, (255, 255, 255), 0.50)
     
     # ── Simulator Status Indicator ──
     sim_y = ly + line_h
     if is_sim:
-        _hud_text(frame, "[SIMULATOR MODE]", lx, sim_y, (80, 80, 255), 0.42)
+        _hud_text(frame, "[SIMULATOR MODE]", lx, sim_y, (80, 80, 200), 0.42)
     else:
-        _hud_text(frame, "[PURE WETWARE]", lx, sim_y, (80, 255, 80), 0.42)
+        _hud_text(frame, "[PURE WETWARE]", lx, sim_y, (80, 200, 80), 0.42)
 
     _hud_text(frame, f"F {force_mag:5.1f}N  T {torque_mag:4.2f}Nm  D {depth:.3f}m",
-              lx, sim_y + line_h, (140, 240, 255), 0.42)
+              lx, sim_y + line_h, (180, 140, 100), 0.42)
     _hud_text(frame, f"SR {success_rate:3.0f}%  FSR {force_safe_rate:3.0f}%  PDI {pdi:.2f}",
-              lx, sim_y + line_h * 2, (100, 210, 230), 0.42)
+              lx, sim_y + line_h * 2, (160, 150, 40), 0.42)
 
     # ── Status badge — breathing pulse on WARNING/DANGER ──
-    badge_x = lx + 300
+    badge_x = lx + 290
     badge_y = ly
     if fn >= 0.5:
         # Breathing: sinusoidal alpha modulation (0.5–1.0 range)
@@ -184,7 +195,7 @@ def _overlay_text(frame, ep, reward, pdi, min_health, glow_layer,
     _hud_text(frame, status, badge_x, badge_y, s_color, 0.40, 1)
 
     # ── Bottom-left: minimal health indicator ──
-    _hud_text(frame, f"HEALTH {min_health:.2f}", lx, h - 12, (100, 110, 120), 0.30)
+    _hud_text(frame, f"SYSTEM HEALTH {min_health:.2f}", lx, h - 12, (100, 110, 120), 0.30)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -227,13 +238,19 @@ def _overlay_neuron_grid(frame, firing_rates, min_health, glow_layer,
     fr_median = np.median(firing_rates)
     fr_range = max(firing_rates.max() - firing_rates.min(), 1.0)
 
-    # ── Pure black background behind the entire grid area ──
-    pad = 4  # padding around the grid
+    # ── High-Tech MEA Glass Panel Backing ──
+    pad = 6  # padding around the grid
     bg_x0 = max(0, gx0 - pad)
     bg_y0 = max(0, gy0 - pad)
-    bg_x1 = min(w, gx0 + total + pad)
+    bg_x1 = min(w, gx0 + total + pad + 18) # include gauge
     bg_y1 = min(h, gy0 + total + pad)
-    frame[bg_y0:bg_y1, bg_x0:bg_x1] = 0
+    
+    # Semi-transparent dark glass panel
+    roi = frame[bg_y0:bg_y1, bg_x0:bg_x1]
+    frame[bg_y0:bg_y1, bg_x0:bg_x1] = (roi * 0.12).astype(np.uint8)
+    # Draw border
+    cv2.rectangle(frame, (bg_x0, bg_y0), (bg_x1, bg_y1), (60, 60, 60), 1, cv2.LINE_AA)
+    _hud_text(frame, "MEA GRID & GAUGE", bg_x0 + 6, bg_y0 - 4, (120, 120, 120), 0.28)
 
     # ── Draw 8×8 circle grid ──
     for row in range(grid_n):
@@ -311,19 +328,19 @@ def _overlay_neuron_grid(frame, firing_rates, min_health, glow_layer,
             fill_top = bar_y0 + bar_h - fill_h
             for py in range(fill_top, bar_y0 + bar_h):
                 t = (bar_y0 + bar_h - py) / bar_h  # 0=bottom, 1=top
-                # Cold gradient: Ice-blue(0) → Cyan(0.5) → Magenta-red(1.0)
+                # Muted electrophysiology gradient: Steel Blue -> Teal -> Amber
                 if t < 0.5:
                     t2 = t * 2.0
-                    cr = int(80 + 100 * t2)
-                    cg = int(200 + 55 * (1 - t2))
-                    cb_c = int(255 - 30 * t2)
+                    cb_c = int(180 * (1 - t2) + 160 * t2)
+                    cg = int(140 * (1 - t2) + 150 * t2)
+                    cr = int(100 * (1 - t2) + 40 * t2)
                 else:
                     t2 = (t - 0.5) * 2.0
-                    cr = int(180 + 75 * t2)
-                    cg = int(140 * (1 - t2))
-                    cb_c = int(225 * (1 - t2) + 60 * t2)
+                    cb_c = int(160 * (1 - t2) + 80 * t2)
+                    cg = int(150 * (1 - t2) + 150 * t2)
+                    cr = int(40 * (1 - t2) + 220 * t2)
                 for px in range(bar_x, min(bar_x + gauge_w, w)):
-                    frame[py, px] = [cr, cg, cb_c]
+                    frame[py, px] = [cb_c, cg, cr]
 
         # Threshold line at 100% — crisp white dash
         thresh_y = bar_y0
@@ -475,6 +492,10 @@ def _overlay_evolution_heatmap(frame, glow_layer):
             blended = roi * (1.0 - mask * 0.7) + overlay * 0.9
             frame[py0:y_end, px0:x_end] = np.clip(blended, 0, 255).astype(np.uint8)
 
+            # Draw panel borders
+            cv2.rectangle(frame, (px0 - 4, py0 - 4), (x_end + 4, y_end + 4), (60, 60, 60), 1, cv2.LINE_AA)
+            _hud_text(frame, "BRAIN EVOLUTION", px0 + 2, py0 - 8, (120, 120, 120), 0.28)
+
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 #  MAIN ENTRY: draw_overlay — Global Bloom Pipeline
@@ -500,6 +521,33 @@ def draw_overlay(frame, ep, reward, pdi, min_health, firing_rates, reward_histor
     """
     frame = np.ascontiguousarray(frame)
     hud.frame_counter += 1
+    h, w = frame.shape[:2]
+
+    # ── High-Tech Target Tracking Reticle (FUI Style) ──
+    cx, cy = w // 2, h // 2
+    t_color = (60, 60, 60) # Muted slate for clean interface
+    # Draw central crosshair
+    cv2.line(frame, (cx - 8, cy), (cx + 8, cy), t_color, 1, cv2.LINE_AA)
+    cv2.line(frame, (cx, cy - 8), (cx, cy + 8), t_color, 1, cv2.LINE_AA)
+    # Outer circle compass
+    cv2.circle(frame, (cx, cy), 32, t_color, 1, cv2.LINE_AA)
+    # Dynamic brackets based on distance
+    size = int(16 + distance * 180)
+    size = max(10, min(40, size))
+    # Top-Left L
+    cv2.line(frame, (cx - size, cy - size), (cx - size + 5, cy - size), t_color, 1, cv2.LINE_AA)
+    cv2.line(frame, (cx - size, cy - size), (cx - size, cy - size + 5), t_color, 1, cv2.LINE_AA)
+    # Top-Right L
+    cv2.line(frame, (cx + size, cy - size), (cx + size - 5, cy - size), t_color, 1, cv2.LINE_AA)
+    cv2.line(frame, (cx + size, cy - size), (cx + size, cy - size + 5), t_color, 1, cv2.LINE_AA)
+    # Bottom-Left L
+    cv2.line(frame, (cx - size, cy + size), (cx - size + 5, cy + size), t_color, 1, cv2.LINE_AA)
+    cv2.line(frame, (cx - size, cy + size), (cx - size, cy + size - 5), t_color, 1, cv2.LINE_AA)
+    # Bottom-Right L
+    cv2.line(frame, (cx + size, cy + size), (cx + size - 5, cy + size), t_color, 1, cv2.LINE_AA)
+    cv2.line(frame, (cx + size, cy + size), (cx + size, cy + size - 5), t_color, 1, cv2.LINE_AA)
+    # Target value label below the reticle
+    _hud_text(frame, f"TGT DIST: {distance:.3f}M", cx - 35, cy + size + 14, (120, 120, 120), 0.28)
 
     # ── Step 1: Allocate glow layer (black canvas, same dims) ──
     glow_layer = np.zeros_like(frame)
