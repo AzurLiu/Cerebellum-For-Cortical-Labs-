@@ -4,6 +4,12 @@ Senxe Cerebellum is an open-source research framework that interfaces living bio
 
 The framework maps multi-modal physical sensor readings (force, torque, kinematics) into closed-loop electrical stimulation patterns and decodes biological firing outputs (spikes) into continuous action trajectories to solve force-sensitive assembly tasks (such as the RoboSuite NutAssembly benchmark).
 
+<p align="center">
+  <img src="assets/hud_preview.png" alt="Senxe Cerebellum Live Telemetry HUD Overlay" width="720">
+  <br>
+  <em>Senxe Cerebellum v4.0 Live HUD Telemetry Overlay (RoboSuite NutAssembly task on Franka Panda)</em>
+</p>
+
 > [!NOTE]
 > **Hardware Fallback**: This framework is built directly on the official Cortical Labs `cl-sdk`. It automatically detects physical hardware; when a CL1 device is not present, it gracefully falls back to the SDK's official Poisson simulation server, enabling developers and researchers to run the entire pipeline locally.
 
