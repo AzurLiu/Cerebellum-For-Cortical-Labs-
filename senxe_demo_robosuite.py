@@ -107,8 +107,6 @@ class CL1Agent:
         self.curiosity = NeuralCuriosity()
         self.episode_rewards = []
         self.best_reward = -np.inf
-        self.action_bias = np.zeros(self.action_dim)
-        self.lr = 0.05
         self.top_channels = (channel_ranking[:PREDICTABLE_STIM_TOP_K].tolist()
                              if channel_ranking is not None else list(range(PREDICTABLE_STIM_TOP_K)))
 
@@ -168,7 +166,6 @@ class CL1Agent:
         obs, _ = self.env.reset()
         obs_info = extract_obs(obs)
         self.pdi.reset(); self.decoder.reset(); self.curiosity.reset()
-        self.action_bias = np.zeros(self.action_dim)
         total_reward = 0.0; frames_list = []
         ep_successes = []; ep_force_safe = []
         step_rewards = deque(maxlen=50); cur_fr = np.zeros(64)
@@ -187,8 +184,7 @@ class CL1Agent:
             # PDI + 好奇心联合驱动
             fep_boost = pdi_val * 0.3 + novelty * 0.1
             raw = self.decoder.decode(spikes, pdi_boost=fep_boost)
-            # Add learned action bias (Hebbian momentum)
-            action = np.clip(raw + self.action_bias, -1.0, 1.0)
+            action = raw
             obs, reward, terminated, truncated, info = self.env.step(action)
             obs_info = extract_obs(obs)
             total_reward += reward
@@ -217,10 +213,7 @@ class CL1Agent:
             self._unpredictable_stim_inject(penalty)
             prev_dist = cur_dist
 
-            # Reward-modulated learning (Hebbian action momentum)
-            if reward > -0.5:
-                self.action_bias += self.lr * action * (reward + 1.0)
-                self.action_bias = np.clip(self.action_bias, -0.5, 0.5)
+
 
             if record:
                 try:
