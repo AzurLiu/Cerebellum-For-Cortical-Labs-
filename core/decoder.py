@@ -71,6 +71,7 @@ class AntagonisticDecoder:
         # Population vector weights from calibration responsiveness
         if channel_weights is not None:
             self.ch_weights = np.array(channel_weights, dtype=np.float64)
+            self.ch_weights = np.maximum(self.ch_weights, 0.0)  # Prevent negative weights
             self.ch_weights = self.ch_weights / (self.ch_weights.max() + 1e-6)
         else:
             self.ch_weights = np.ones(64)
