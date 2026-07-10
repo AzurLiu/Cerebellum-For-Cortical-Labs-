@@ -35,9 +35,6 @@ def main():
     print(f"  Episodes per condition: {EPISODES_PER_CONDITION}")
     print("=" * 60)
 
-    # Use the same seed for reproducible environment initializations
-    np.random.seed(SEED)
-
     # Open neurons (or simulator)
     with cl_open() as neurons:
         # Phase 0: Calibration
@@ -54,6 +51,9 @@ def main():
             stim_mode = cond["stim_mode"]
             
             print(f"\n---> Starting Condition: {name} <---")
+            # Reset random seed per condition to guarantee paired episode layouts
+            np.random.seed(SEED)
+            
             # Create a fresh agent for each condition to reset internal state (EMA, PDI, etc.)
             agent = CL1Agent(
                 env, raw_env, neurons, 

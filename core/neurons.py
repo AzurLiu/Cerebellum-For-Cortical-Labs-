@@ -34,10 +34,8 @@ def is_cl_simulator() -> bool:
 @contextmanager
 def cl_open():
     """Unified CL1 entry point: connects to real Cortical Labs biological hardware."""
-    try:
-        yield _cl_sdk.open()
-    finally:
-        pass
+    with _cl_sdk.open() as neurons:
+        yield neurons
 
 def warmup_calibration(
     neurons,
