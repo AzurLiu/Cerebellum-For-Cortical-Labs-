@@ -44,7 +44,7 @@ ACTION_SCALE      = 0.35
 
 PREDICTABLE_STIM_TOP_K    = 8
 PREDICTABLE_BURST_N       = 15
-PREDICTABLE_BURST_HZ      = 300
+PREDICTABLE_BURST_HZ      = 200
 
 # ═══ VIE: Virtual Interference Encoding ═══
 class VIE:
@@ -76,7 +76,7 @@ class VIE:
         direction = delta / (distance + 1e-8)
 
         stim = StimDesign(160, -1.0, 160, 1.0)
-        burst_hz = int(np.clip(50 + 400 * distance, 50, 400))
+        burst_hz = int(np.clip(50 + 400 * distance, 50, 200))
         burst_n  = max(1, min(10, int(distance * 15)))
         self.neurons.stim(ChannelSet(*self.CH_PRESSURE[:8]), stim, BurstDesign(burst_n, burst_hz))
 
@@ -88,7 +88,7 @@ class VIE:
                     visual_brightness = np.mean(vis_frame.astype(np.float32)) / 255.0
             except Exception:
                 pass
-        vis_hz = int(np.clip(50 + 300 * visual_brightness, 50, 350))
+        vis_hz = int(np.clip(50 + 300 * visual_brightness, 50, 200))
         vis_n  = max(1, int(visual_brightness * 5))
         vis_stim = StimDesign(160, -0.8, 160, 0.8)
         self.neurons.stim(ChannelSet(*self.CH_PRESSURE[8:16]), vis_stim, BurstDesign(vis_n, vis_hz))
