@@ -59,16 +59,19 @@ class VIE:
         raw_env: Optional raw RoboSuite environment reference.
     """
 
-    # ── Non-overlapping channel layout ──
-    CH_FORCE_MAG   = list(range(0, 6))     # Force magnitude rate coding
-    CH_FORCE_AXIS  = list(range(6, 12))    # Per-axis force direction encoding
-    CH_FORCE_WAVE  = list(range(12, 16))   # Force transient traveling wave
-    CH_TORQUE      = list(range(16, 28))   # Torque / friction
-    CH_VELOCITY    = list(range(28, 32))   # Velocity supplement (independent)
-    CH_POSITION    = list(range(32, 47))   # End-effector position
-    CH_GOALDIR     = list(range(47, 55))   # Goal direction
-    CH_DEPTH       = list(range(55, 60))   # Insertion depth
-    CH_RESERVED    = list(range(60, 64))   # Reserved
+    # ── Non-overlapping channel layout (Scattered for Minicolumns) ──
+    _prng = np.random.RandomState(42)
+    _all_channels = _prng.permutation(64).tolist()
+    
+    CH_FORCE_MAG   = _all_channels[0:6]      # Force magnitude rate coding
+    CH_FORCE_AXIS  = _all_channels[6:12]     # Per-axis force direction encoding
+    CH_FORCE_WAVE  = _all_channels[12:16]    # Force transient traveling wave
+    CH_TORQUE      = _all_channels[16:28]    # Torque / friction
+    CH_VELOCITY    = _all_channels[28:32]    # Velocity supplement (independent)
+    CH_POSITION    = _all_channels[32:47]    # End-effector position
+    CH_GOALDIR     = _all_channels[47:55]    # Goal direction
+    CH_DEPTH       = _all_channels[55:60]    # Insertion depth
+    CH_RESERVED    = _all_channels[60:64]    # Reserved
 
     def __init__(self, neurons, force_threshold=20.0, depth_threshold=0.02,
                  raw_env=None):
@@ -109,8 +112,9 @@ class VIE:
 
         # ══ Force Axis Encoding (CH 6-11) — per-axis direction ══
         for ax in range(3):
-            cb = self.CH_FORCE_AXIS[ax * 2]
-            chs = ChannelSet(*[cb, cb + 1])
+            ch1 = self.CH_FORCE_AXIS[ax * 2]
+            ch2 = self.CH_FORCE_AXIS[ax * 2 + 1]
+            chs = ChannelSet(*[ch1, ch2])
             f = force[ax]; inten = np.clip(abs(f) / (self.force_threshold / 3), 0.1, 2.0)
             fs = StimDesign(160, -inten * np.sign(f), 160, inten * np.sign(f))
             fb = BurstDesign(max(1, int(abs(f) / 3)), int(50 + abs(f) * 15))
@@ -135,8 +139,9 @@ class VIE:
             for ax in range(3):
                 t = torque[ax]
                 if abs(t) > 0.01:
-                    cb = self.CH_TORQUE[0] + ax * 4
-                    chs = ChannelSet(*range(cb, min(cb + 4, 28)))
+                    chs_list = self.CH_TORQUE[ax * 4 : (ax + 1) * 4]
+                    chs = ChannelSet(*chs_list)
+                    cb = chs_list[0]
                     inten = np.clip(abs(t) * 3.0 * self.channel_gain[cb], 0.1, 2.0)
                     ws = StimDesign(160, -inten, 160, inten)
                     whz = int(np.clip(60 * abs(t), 20, 200))
@@ -156,8 +161,9 @@ class VIE:
 
         # ══ Position Encoding (CH 32-46) ══
         for ax in range(3):
-            cb = self.CH_POSITION[0] + ax * 5
-            chs = ChannelSet(*range(cb, min(cb + 5, 47)))
+            chs_list = self.CH_POSITION[ax * 5 : (ax + 1) * 5]
+            chs = ChannelSet(*chs_list)
+            cb = chs_list[0]
             p = eef_pos[ax]; g = self.channel_gain[cb]
             phz = int(np.clip((100 + 200 * abs(p)) * g, 50, 350))
             ps = StimDesign(160, -abs(p) * 0.8 * g, 160, abs(p) * 0.8 * g)
@@ -165,8 +171,9 @@ class VIE:
 
         # ══ Goal Direction (CH 47-54) ══
         for ax in range(3):
-            cb = self.CH_GOALDIR[0] + ax * 2
-            chs = ChannelSet(*[cb, min(cb + 1, 54)])
+            chs_list = self.CH_GOALDIR[ax * 2 : (ax + 1) * 2]
+            chs = ChannelSet(*chs_list)
+            cb = chs_list[0]
             d = direction[ax]; inten = np.clip((abs(d) * 1.5 + 0.1) * self.channel_gain[cb], 0.1, 2.0)
             ds = StimDesign(160, -inten * np.sign(d), 160, inten * np.sign(d))
             db = BurstDesign(max(1, int(abs(d) * 5)), int(50 + abs(d) * 100))

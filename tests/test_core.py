@@ -209,16 +209,16 @@ class TestAntagonisticDecoder:
 
     def test_decode_flexor_only(self):
         d = AntagonisticDecoder(action_dim=4, ema_alpha=1.0, action_scale=1.0)
-        # Only flexor channels for dim 0 (CH 0-7)
-        spikes = list(range(0, 8))
+        # Only flexor channels for dim 0 (Even CH in 0-15)
+        spikes = [0, 2, 4, 6]
         action = d.decode(spikes)
         # dim 0 should be positive (flexor > extensor)
         assert action[0] > 0
 
     def test_decode_extensor_only(self):
         d = AntagonisticDecoder(action_dim=4, ema_alpha=1.0, action_scale=1.0)
-        # Only extensor channels for dim 0 (CH 32-39)
-        spikes = list(range(32, 40))
+        # Only extensor channels for dim 0 (Odd CH in 0-15)
+        spikes = [1, 3, 5, 7]
         action = d.decode(spikes)
         # dim 0 should be negative (extensor > flexor)
         assert action[0] < 0
@@ -226,21 +226,21 @@ class TestAntagonisticDecoder:
     def test_decode_balanced_near_zero(self):
         d = AntagonisticDecoder(action_dim=4, ema_alpha=1.0, action_scale=1.0)
         # Equal flexor and extensor for dim 0
-        spikes = list(range(0, 8)) + list(range(32, 40))
+        spikes = [0, 2, 4, 6] + [1, 3, 5, 7]
         action = d.decode(spikes)
         # Should be close to zero (balanced)
         assert abs(action[0]) < 0.15
 
     def test_decode_output_clipped(self):
         d = AntagonisticDecoder(action_dim=4, action_scale=2.0)
-        spikes = list(range(0, 32))  # all flexors
+        spikes = list(range(0, 64, 2))  # all flexors (Even CH)
         action = d.decode(spikes)
         assert np.all(action >= -1.0)
         assert np.all(action <= 1.0)
 
     def test_ema_smoothing(self):
         d = AntagonisticDecoder(action_dim=4, ema_alpha=0.5, action_scale=1.0)
-        spikes = list(range(0, 8))
+        spikes = [0, 2, 4, 6]
         a1 = d.decode(spikes)
         a2 = d.decode(spikes)
         # Second decode should be different due to EMA blending with prev
@@ -249,7 +249,7 @@ class TestAntagonisticDecoder:
 
     def test_reset_clears_ema(self):
         d = AntagonisticDecoder(action_dim=4)
-        d.decode(list(range(0, 32)))
+        d.decode(list(range(0, 64, 2)))
         assert not np.allclose(d.prev_action, 0.0)
         d.reset()
         assert np.allclose(d.prev_action, 0.0)

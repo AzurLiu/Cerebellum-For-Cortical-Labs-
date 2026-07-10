@@ -8,10 +8,10 @@ Inspired by the antagonistic muscle pairs in vertebrate motor systems
 (e.g., biceps/triceps), it converts raw neural spike channels into smooth,
 continuous action vectors suitable for robotic control.
 
-64 channels are split into two antagonistic populations (32 each):
+64 channels are interleaved into two antagonistic populations (Even/Odd pairs):
 
-    Flexor   (CH 0–31)  → positive force per action dimension
-    Extensor (CH 32–63) → negative force per action dimension
+    Flexor   (Even CH: 0, 2, 4...) → positive force per action dimension
+    Extensor (Odd CH: 1, 3, 5...)  → negative force per action dimension
 
     Action[i] = (flexor_count − extensor_count) / (total + ε)
 
@@ -107,13 +107,20 @@ class AntagonisticDecoder:
         action = np.zeros(self.action_dim)
 
         for i in range(self.action_dim):
-            f_lo = i * self.group_size
-            f_hi = min((i + 1) * self.group_size, 32)
-            e_lo = 32 + f_lo
-            e_hi = min(32 + f_hi, 64)
+            # Determine the range of channel pairs (0 to 31) assigned to this action dimension
+            p_lo = i * self.group_size
+            p_hi = 32 if i == self.action_dim - 1 else (i + 1) * self.group_size
 
-            flex = sum(self.ch_weights[ch] for ch in spike_channels if f_lo <= ch < f_hi)
-            ext = sum(self.ch_weights[ch] for ch in spike_channels if e_lo <= ch < e_hi)
+            flex = 0.0
+            ext = 0.0
+            for p in range(p_lo, p_hi):
+                ch_f = 2 * p      # Even channel -> Flexor
+                ch_e = 2 * p + 1  # Odd channel -> Extensor
+                if ch_f in spike_channels:
+                    flex += self.ch_weights[ch_f]
+                if ch_e in spike_channels:
+                    ext += self.ch_weights[ch_e]
+
             action[i] = (flex - ext) / (flex + ext + 1e-6)
 
         # FEP: high PDI (unstable state) → inject exploration noise
