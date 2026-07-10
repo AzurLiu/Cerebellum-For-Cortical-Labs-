@@ -32,6 +32,66 @@ The **Neural Curiosity** module ([core/curiosity.py](file:///Users/azur/Desktop/
 
 ---
 
+## System Architecture
+
+```mermaid
+graph TB
+    subgraph Env [RoboSuite Environment]
+        RS[Franka Panda Arm] -->|Tactile Sensory| F["Force (3D) & Torque (3D)"]
+        RS -->|Kinematics| V["EEF Position & Velocity"]
+        RS -->|Spatial Target| T["Peg-to-Hole Target Vector"]
+    end
+
+    subgraph Enc [Virtual Interference Encoding]
+        F -->|Sparse Delta Coding| SDC["Delta Change Filter"]
+        V -->|Attention Multiplexing| AMUX["Task Stage Router"]
+        T -->|Tuning Curves| TC["Spatial Tuning (27 bins)"]
+        SDC & AMUX & TC -->|Homeostatic Gain| Gain["Gain Adaptation (channel_gain)"]
+        Gain -->|Pulse Design| Stim["64-ch MEA Stimulation Design"]
+    end
+
+    subgraph Bio [CL1 Wetware Platform]
+        Stim -->|Electrical Pulse| MEA["64-ch Electrode Array"]
+        MEA -->|Evoke Activity| Neu["Biological Neurons (STDP)"]
+        Neu -->|Extracellular Recording| Spikes["Spike Train Extraction (threshold 99.5%)"]
+    end
+
+    subgraph Dec [Antagonistic Motor Decoder]
+        Spikes -->|Even Channels| Flex["Flexor Population Sum"]
+        Spikes -->|Odd Channels| Ext["Extensor Population Sum"]
+        Flex & Ext -->|Differential Actuation| Diff["(Flex - Ext) / (Flex + Ext)"]
+        Diff -->|Mechanical Inertia| EMA["EMA Smoothing Filter"]
+        EMA -->|Continuous Control| Act["7D Joint Action Output"]
+    end
+
+    subgraph Gate [FEP Active Inference Gate]
+        V -->|Velocity Variance| PDI["Physical Disturbance Index (PDI)"]
+        Spikes -->|Firing Rate Novelty| Cur["Neural Curiosity"]
+        PDI & Cur -->|Exploration Noise| Noise["explore_noise (Gaussian)"]
+    end
+
+    Act -->|env.step| RS
+    Noise -->|Perturbation| Act
+    RS -->|Reward & Collisions| FB["Stimulus Reinforcement"]
+    FB -->|Predictable Stim (Reward)| MEA
+    FB -->|Unpredictable Noise (Penalty)| MEA
+
+    %% Styles
+    classDef envStyle fill:#0b132b,stroke:#48cae4,stroke-width:2px,color:#fff;
+    classDef encStyle fill:#1c2541,stroke:#00b4d8,stroke-width:2px,color:#fff;
+    classDef bioStyle fill:#102c57,stroke:#ff5757,stroke-width:2px,color:#fff;
+    classDef decStyle fill:#1b4d3e,stroke:#2ecc71,stroke-width:2px,color:#fff;
+    classDef gateStyle fill:#3a0ca3,stroke:#7209b7,stroke-width:2px,color:#fff;
+
+    class RS,F,V,T envStyle;
+    class SDC,AMUX,TC,Gain,Stim encStyle;
+    class MEA,Neu,Spikes bioStyle;
+    class Flex,Ext,Diff,EMA,Act decStyle;
+    class PDI,Cur,Noise,FB gateStyle;
+```
+
+---
+
 ## Major Updates (Compared to April 2026 Release)
 
 Since the initial release (`a1057ea` on April 13, 2026), the framework has undergone major refactoring, bug fixing, and scientific alignment:
