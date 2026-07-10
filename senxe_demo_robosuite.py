@@ -62,8 +62,31 @@ def make_robosuite_env(render=False):
                      render_camera="frontview", horizon=CL1_MAX_STEPS, reward_shaping=True)
     return GymWrapper(raw), raw
 
-def extract_obs(obs):
+def extract_obs(obs, raw_env=None):
     """Extract force, torque, position, and goal vectors from the observation."""
+    if raw_env is not None:
+        try:
+            eef = raw_env.sim.data.get_site_xpos("gripper0_right_grip_site")
+            vel = raw_env.sim.data.get_site_xvelp("gripper0_right_grip_site")
+            # NutAssembly target is the peg
+            peg = raw_env.sim.data.body("peg1").xpos if hasattr(raw_env.sim.data, "body") else raw_env.sim.data.get_body_xpos("peg1")
+            p2h = peg - eef
+            frc_raw = getattr(raw_env.robots[0], "ee_force", np.zeros(3))
+            trq_raw = getattr(raw_env.robots[0], "ee_torque", np.zeros(3))
+            frc = frc_raw["right"] if isinstance(frc_raw, dict) and "right" in frc_raw else frc_raw
+            trq = trq_raw["right"] if isinstance(trq_raw, dict) and "right" in trq_raw else trq_raw
+            
+            # Ensure they are flat arrays
+            frc = np.array(frc).flatten()[:3]
+            trq = np.array(trq).flatten()[:3]
+            p2h = np.array(p2h).flatten()[:3]
+            eef = np.array(eef).flatten()[:3]
+            vel = np.array(vel).flatten()[:3]
+            jnt = raw_env.robots[0]._joint_positions
+            return dict(eef_pos=eef, eef_vel=vel, force=frc, torque=trq, peg_to_hole=p2h, joint_pos=jnt)
+        except Exception:
+            pass
+
     if isinstance(obs, dict):
         eef = np.array(obs.get("robot0_eef_pos", np.zeros(3)), dtype=np.float64).flatten()[:3]
         vel = np.array(obs.get("robot0_eef_vel_lin", obs.get("robot0_eef_vel", np.zeros(3))), dtype=np.float64).flatten()[:3]
@@ -72,19 +95,13 @@ def extract_obs(obs):
         p2h = np.array(obs.get("peg_to_hole", obs.get("hole_pos", np.zeros(3)) - eef), dtype=np.float64).flatten()[:3]
         jnt = np.array(obs.get("robot0_joint_pos", np.zeros(7)), dtype=np.float64).flatten()
         return dict(eef_pos=eef, eef_vel=vel, force=frc, torque=trq, peg_to_hole=p2h, joint_pos=jnt)
-    # flat array 路径：记录警告，使用安全默认值
-    import warnings
-    warnings.warn(
-        "extract_obs received flat array — index mapping may be incorrect. "
-        "Prefer dict observations via RoboSuite config.",
-        stacklevel=2
-    )
+    
     o = np.array(obs, dtype=np.float64).flatten(); n = len(o)
     return dict(
         eef_pos=o[:3] if n >= 3 else np.zeros(3),
         eef_vel=o[3:6] if n >= 6 else np.zeros(3),
-        force=np.zeros(3),   # 不猜测，返回零值
-        torque=np.zeros(3),  # 不猜测，返回零值
+        force=np.zeros(3),
+        torque=np.zeros(3),
         peg_to_hole=np.zeros(3),
         joint_pos=np.zeros(7),
     )
@@ -164,7 +181,7 @@ class CL1Agent:
 
     def run_episode(self, max_steps=CL1_MAX_STEPS, record=False, ep_num=0):
         obs, _ = self.env.reset()
-        obs_info = extract_obs(obs)
+        obs_info = extract_obs(obs, raw_env=self.raw_env)
         self.pdi.reset(); self.decoder.reset(); self.curiosity.reset()
         total_reward = 0.0; frames_list = []
         ep_successes = []; ep_force_safe = []
@@ -186,7 +203,7 @@ class CL1Agent:
             raw = self.decoder.decode(spikes, pdi_boost=fep_boost)
             action = raw
             obs, reward, terminated, truncated, info = self.env.step(action)
-            obs_info = extract_obs(obs)
+            obs_info = extract_obs(obs, raw_env=self.raw_env)
             total_reward += reward
 
             force_mag = np.linalg.norm(obs_info["force"])
@@ -325,7 +342,7 @@ def train_ppo_baseline(record_last_n=RECORD_LAST_N):
                 action, _ = model.predict(obs, deterministic=True)
                 obs, r, term, trunc, _ = eval_env.step(action)
                 ep_r += r; done = term or trunc
-                oi = extract_obs(obs)
+                oi = extract_obs(obs, raw_env=eval_raw)
                 ep_forces.append(np.linalg.norm(oi["force"]))
                 d, _ = compute_insertion_depth(oi)
                 ep_depths.append(d)
@@ -375,7 +392,8 @@ def run_random_baseline(num_episodes=RANDOM_EPISODES):
             action = env.action_space.sample()
             obs, r, term, trunc, _ = env.step(action)
             total_reward += r; done = term or trunc
-            oi = extract_obs(obs)
+            # raw env for random baseline is env.env
+            oi = extract_obs(obs, raw_env=env.env)
             ep_forces.append(np.linalg.norm(oi["force"]))
             d, _ = compute_insertion_depth(oi)
             ep_depths.append(d)
