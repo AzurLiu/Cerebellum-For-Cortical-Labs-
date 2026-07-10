@@ -19,7 +19,7 @@ The **Virtual Interference Encoding (VIE)** module ([core/vie.py](file:///Users/
 ### 2. Antagonistic Muscle-Pair Decoding
 Motor outputs are decoded based on the biological flexor/extensor antagonistic principle ([core/decoder.py](file:///Users/azur/Desktop/github_repo/core/decoder.py)). 
 *   **Opposing Populations**: The 64 channels are interleaved into opposing sub-populations (Even/Odd pairs). Each of the 7 action dimensions is driven by the differential activity:
-    $$\text{Action}[i] = \frac{\text{flexor\_sum} - \text{extensor\_sum}}{\text{flexor\_sum} + \text{extensor\_sum} + \epsilon}$$
+    $$\text{Action}[i] = \frac{\text{flexor} - \text{extensor}}{\text{flexor} + \text{extensor} + \epsilon}$$
 *   **EMA Inertia Filter**: Outputs are smoothed using an Exponential Moving Average (EMA) filter to mimic the biomechanical damping and inertia of physical muscle tissue, producing jerk-free trajectories.
 
 ### 3. FEP-Driven Kinematic Gate (PDI)
