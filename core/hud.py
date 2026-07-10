@@ -207,7 +207,7 @@ def _overlay_neuron_grid(frame, firing_rates, min_health, glow_layer,
     grid_n = 8
     total = grid_n * spacing                # 128px
     gauge_w = 6; gauge_gap = 10
-    gx0, gy0 = 14, 86                      # origin (pushed down for breathing room below HUD)
+    gx0, gy0 = 14, 105                      # origin (pushed down to prevent overlap with HUD text)
 
     if gy0 + total + 5 > h or gx0 + total + gauge_gap + gauge_w + 5 > w:
         return
