@@ -65,15 +65,18 @@ class NeuralCuriosity:
                    Low values indicate familiar patterns (drive exploitation).
         """
         fr_norm = firing_rates / (firing_rates.max() + 1e-6)
-        self.memory.append(fr_norm.copy())
 
         if len(self.memory) < 5:
+            self.memory.append(fr_norm.copy())
             return 1.0  # High curiosity during initial exploration phase
 
-        # Euclidean distance to mean of recent K patterns
+        # Euclidean distance to mean of recent K patterns (excluding current)
         recent = np.array(list(self.memory)[-min(20, len(self.memory)):])
         mean_pattern = recent.mean(axis=0)
         dist = np.linalg.norm(fr_norm - mean_pattern)
+        
+        self.memory.append(fr_norm.copy())
+        
         # Normalize: typical distance ~0.1–0.5 for 64-dim unit vectors
         novelty = np.clip(dist * 3.0, 0.0, 2.0)
         return float(novelty)
